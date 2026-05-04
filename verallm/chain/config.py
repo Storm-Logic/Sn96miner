@@ -181,16 +181,25 @@ class ChainConfig:
         """Resolve EVM RPC URL from CLI flags.
 
         Priority: explicit HTTP ``--subtensor-chain-endpoint`` >
-        ``--subtensor-network`` network default > None (use JSON default).
+        auto-translated ``ws[s]://`` of the same form >
+        ``--subtensor-network`` network default >
+        None (use JSON default).
 
-        WebSocket endpoints (ws://, wss://) are Substrate RPC, NOT EVM
-        RPC — don't use them here.  The EVM RPC is always HTTP-based
-        (e.g. https://lite.chain.opentensor.ai).  A local subtensor at
-        ws://localhost:9944 serves Substrate but not EVM.
+        Modern Bittensor subtensor exposes BOTH Substrate (WS) and EVM
+        (HTTP) on the same host:port.  When the operator passes
+        ``ws://host:port`` we translate to ``http://host:port`` for the
+        EVM client — saves operators from having to specify two endpoints
+        for what is one process.  The ``--evm-rpc-url`` flag (where the
+        caller exposes one) still wins over this auto-translation.
         """
         if chain_endpoint and chain_endpoint.startswith(("http://", "https://")):
             return chain_endpoint
-        # ws:// endpoints are subtensor Substrate RPC, not EVM — skip
+        if chain_endpoint and chain_endpoint.startswith(("ws://", "wss://")):
+            # ws:// → http://, wss:// → https://  (same host:port — Bittensor
+            # subtensor exposes both protocols on one port).
+            return ("http://" + chain_endpoint[len("ws://"):]) \
+                if chain_endpoint.startswith("ws://") \
+                else ("https://" + chain_endpoint[len("wss://"):])
         if subtensor_network:
             return cls._NETWORK_RPC_URLS.get(subtensor_network)
         return None

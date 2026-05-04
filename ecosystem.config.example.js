@@ -53,6 +53,11 @@ module.exports = {
     {
       name: "validator",
       script: ".venv-validator/bin/python",
+      // Public RPC default works out of the box.  If you run a local
+      // subtensor docker exposing both Substrate (WS) and EVM (HTTP) on
+      // the same port, append:  --subtensor-chain-endpoint ws://localhost:9944
+      // (EVM auto-translates to http://localhost:9944) — or be explicit
+      // with --evm-rpc-url http://localhost:9944 alongside it.
       args: "-u -m neurons.validator --wallet <WALLET> --hotkey <HOTKEY> --netuid 96 --subtensor-network finney --auto-update --analytics --retain-backups",
       cwd: "<REPO_ROOT>",
       env: {
