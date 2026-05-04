@@ -50,6 +50,7 @@ from neurons.discovery import ActiveMiner, discover_active_miners
 from neurons.version import spec_version, version_str, validator_version, validator_version_str
 from neurons.receipts import (
     ServiceReceipt,
+    ValidatorAuthority,
     create_receipt,
     receipt_from_dict,
     receipt_to_dict,
@@ -371,6 +372,17 @@ class ValidatorNeuron:
                 )
                 self._subnet_config_client = SubnetConfigClient(_sn_chain_config)
                 bt.logging.info(f"SubnetConfig client initialized: {_sn_config_addr}")
+                # Boot-time read — without this, weight-setting fires with
+                # ScoringParams() defaults until the first _close_epoch.
+                try:
+                    self._scoring = self._subnet_config_client.get_scoring_params()
+                    self._last_good_scoring = self._scoring
+                    bt.logging.info(
+                        f"SubnetConfig boot read: burn={self._scoring.emission_burn:.0%} "
+                        f"ema={self._scoring.ema_alpha:.2f} tp={self._scoring.throughput_power:.1f}"
+                    )
+                except Exception as e:
+                    bt.logging.warning(f"SubnetConfig boot read failed, using defaults: {e}")
             except Exception as e:
                 bt.logging.warning(f"SubnetConfig client failed to initialize: {e}")
                 self._subnet_config_client = None
@@ -384,13 +396,26 @@ class ValidatorNeuron:
         self._metagraph = None
         self._bt_module = bt
 
-        # Validator signing key for receipts (Ed25519, NOT Sr25519)
-        from nacl.signing import SigningKey as _SK
-        self._validator_hotkey_bytes = bytes(_SK(hotkey_seed[:32]).verify_key)
+        # Validator signing identity — Sr25519 (the same key the metagraph
+        # publishes).  Receipts are anchored to this pubkey so that
+        # verify_service_receipt can resolve SS58 → UID against a fresh
+        # metagraph snapshot and reject anything not signed by a registered,
+        # permitted validator.  The 32-byte ``_validator_hotkey_bytes`` is
+        # the raw Sr25519 public key — equivalently, the bytes underlying
+        # ``_validator_hotkey_ss58``.
+        from substrateinterface import Keypair as _Keypair
+        _kp = _Keypair.create_from_seed(hotkey_seed[:32].hex())
+        self._validator_hotkey_bytes = _kp.public_key
         self._validator_private_key = hotkey_seed
 
         # SS58 hotkey address for Sr25519 request signing (miner auth)
         self._validator_hotkey_ss58 = wallet.hotkey.ss58_address
+
+        # Cached at the top of every _close_epoch (one eth_call/epoch, ~72 min).
+        # Used by verify_service_receipt's total-stake gate.  Broader than
+        # the ValidatorRegistry contract's alpha-only register gate by
+        # design — see ValidatorAuthority docstring.
+        self._cached_min_validator_stake: float = 0.0
 
         # Ensure contract-level EVM → UID mapping exists (needs wallet + subtensor + hotkey_seed above)
         self._ensure_evm_registered()
@@ -1528,6 +1553,71 @@ class ValidatorNeuron:
             f"Epoch {epoch_number} closing: pulling receipts from {len(self._epoch_miners)} miners",
         )
 
+        # ── Build the validator authority snapshot for receipt verification.
+        # Done ONCE per epoch close so the per-receipt loop is pure dict +
+        # array access (no RPC, no metagraph rebuild).
+        #
+        # 1. Force a fresh metagraph fetch at the epoch boundary so we don't
+        #    miss validators that registered in the last 0–4 minutes.
+        #    Falls back to the last cached metagraph if Substrate is down.
+        # 2. Build ss58→uid in O(N), replacing per-receipt mg.hotkeys.index().
+        # 3. Read minValidatorStake() once (cheap eth_call), cache for next
+        #    epoch's fallback if RPC is briefly down.
+        try:
+            mg = self._subtensor.metagraph(self.config.netuid)
+            self._metagraph = mg
+        except Exception as e:
+            bt.logging.warning(
+                f"Epoch {epoch_number}: metagraph refresh failed, using last cached: {e}"
+            )
+            mg = self._metagraph
+
+        receipt_authority: ValidatorAuthority | None = None
+        if mg is not None:
+            try:
+                ss58_to_uid = {hk: i for i, hk in enumerate(mg.hotkeys)}
+                permits = list(mg.validator_permit) if hasattr(mg, "validator_permit") else []
+
+                # mg.S = chain's effective subnet stake (tao_weight * tao_stake
+                # + alpha_stake).  See ValidatorAuthority docstring for why
+                # we use total here instead of alpha_stake.
+                #
+                # TODO: minValidatorStake on chain stays at 0 (must — otherwise
+                # root validators with no alpha can't register).  That makes
+                # this stake check a functional no-op, leaving validator_permit
+                # as the actual gate.  If a stricter receipt-side filter is
+                # ever needed, add a dedicated SubnetConfig field rather than
+                # raising minValidatorStake (which would break root-only valis).
+                stakes_src = mg.S if hasattr(mg, "S") else getattr(mg, "stake", [])
+                stakes = [float(s) for s in stakes_src]
+
+                try:
+                    from verallm.chain.validator_registry import ValidatorRegistryClient
+                    vr = ValidatorRegistryClient(self.config)
+                    min_stake_rao = vr.get_min_validator_stake()
+                    self._cached_min_validator_stake = min_stake_rao / 1e9
+                except Exception as e:
+                    bt.logging.debug(
+                        f"minValidatorStake read failed, using last cached "
+                        f"({self._cached_min_validator_stake}): {e}"
+                    )
+
+                receipt_authority = ValidatorAuthority(
+                    ss58_to_uid=ss58_to_uid,
+                    validator_permit=permits,
+                    stakes=stakes,
+                    min_stake=self._cached_min_validator_stake,
+                )
+                bt.logging.debug(
+                    f"Epoch {epoch_number} authority: {len(ss58_to_uid)} hotkeys, "
+                    f"min_stake={self._cached_min_validator_stake:.2f}"
+                )
+            except Exception as e:
+                bt.logging.warning(
+                    f"Epoch {epoch_number}: failed to build receipt authority: {e}. "
+                    f"All receipts will be rejected this epoch (existing EMAs decay)."
+                )
+
         # ── Pass 1: collect all receipts ──────────────────────────
         miner_receipts: Dict[str, List[ServiceReceipt]] = {}  # address -> receipts
         all_epoch_receipts: List[ServiceReceipt] = []
@@ -1539,7 +1629,9 @@ class ValidatorNeuron:
             if not self._running:
                 break
             receipt_futures[
-                self._executor.submit(self._pull_epoch_receipts, miner, epoch_number)
+                self._executor.submit(
+                    self._pull_epoch_receipts, miner, epoch_number, receipt_authority
+                )
             ] = miner
         # Overall budget for all receipt pulls — scales with miner count,
         # floored by config, capped at 120s.
@@ -1630,31 +1722,8 @@ class ValidatorNeuron:
         self.scorer.ema_alpha = self._scoring.ema_alpha
         self.scorer.throughput_power = self._scoring.throughput_power
 
-        # Check blacklist in parallel (one RPC per unique address, cached 5min).
-        # Parallel so one slow/429'd RPC doesn't block scoring of all miners.
-        self._blacklisted_uids = set()
-        if self._subnet_config_client is not None:
-            _unique_addrs = {m.address for m in self._epoch_miners}
-            _bl_futures = {
-                self._executor.submit(
-                    self._subnet_config_client.is_miner_blacklisted, addr
-                ): addr
-                for addr in _unique_addrs
-            }
-            try:
-                for fut in as_completed(_bl_futures, timeout=15):
-                    addr = _bl_futures[fut]
-                    try:
-                        if fut.result():
-                            uid = self._resolve_uid(addr)
-                            if uid is not None:
-                                self._blacklisted_uids.add(uid)
-                                # Policy enforcement, not a validator issue.
-                                bt.logging.info(f"Miner {addr[:10]} (UID {uid}) is BLACKLISTED — score will be zeroed")
-                    except Exception:
-                        pass
-            except _FuturesTimeout:
-                bt.logging.warning("Blacklist check timeout (15s) — proceeding with partial results")
+        # Refresh blacklist from SubnetConfig (parallel RPC per address, cached 5min).
+        self._refresh_blacklist({m.address for m in self._epoch_miners})
 
         # ── GPU UUID dedup: one GPU = one endpoint ─────────────────
         # Build map: gpu_uuid -> list of (address, model_index, ema_score).
@@ -2068,11 +2137,20 @@ class ValidatorNeuron:
         self,
         miner: ActiveMiner,
         epoch_number: int,
+        authority: ValidatorAuthority | None = None,
     ) -> List[ServiceReceipt]:
         """Pull all receipts from a miner for the given epoch.
 
         GET /epoch/{epoch_number}/receipts — returns all accumulated receipts.
-        Verifies signature + freshness for each receipt.
+
+        Each receipt is verified against ``authority`` (built once per epoch
+        close from a fresh metagraph + ValidatorRegistry read).  Receipts
+        whose embedded Sr25519 pubkey does not resolve to a registered
+        validator with permit and stake >= ``minValidatorStake`` are
+        rejected — closes the lone-miner forgery vector entirely.
+
+        Duplicates (same signature appearing more than once in the response)
+        are also dropped — the original anti-replay guard.
         """
         url = f"{miner.endpoint.rstrip('/')}/epoch/{epoch_number}/receipts"
         path = f"/epoch/{epoch_number}/receipts"
@@ -2099,7 +2177,7 @@ class ValidatorNeuron:
             for r_dict in receipt_dicts:
                 try:
                     receipt = receipt_from_dict(r_dict)
-                    if not verify_service_receipt(receipt, epoch_number):
+                    if not verify_service_receipt(receipt, epoch_number, authority=authority):
                         continue
                     if receipt.validator_signature in seen_sigs:
                         duplicates += 1
@@ -2387,6 +2465,37 @@ class ValidatorNeuron:
 
         # Fallback: use local registry
         return list(MODELS_BY_ID.keys())
+
+    def _refresh_blacklist(self, addresses) -> None:
+        """Populate ``self._blacklisted_uids`` from SubnetConfig for the given addresses.
+
+        Called at boot (after startup discovery) AND at every epoch close so
+        weight-setting always sees an up-to-date blacklist.  Without the boot
+        call, the first weight-set after restart fires before the first
+        ``_close_epoch`` and the empty default lets blacklisted miners through.
+        """
+        self._blacklisted_uids = set()
+        if self._subnet_config_client is None or not addresses:
+            return
+        _bl_futures = {
+            self._executor.submit(
+                self._subnet_config_client.is_miner_blacklisted, addr
+            ): addr
+            for addr in addresses
+        }
+        try:
+            for fut in as_completed(_bl_futures, timeout=15):
+                addr = _bl_futures[fut]
+                try:
+                    if fut.result():
+                        uid = self._resolve_uid(addr)
+                        if uid is not None:
+                            self._blacklisted_uids.add(uid)
+                            bt.logging.info(f"Miner {addr[:10]} (UID {uid}) is BLACKLISTED — score will be zeroed")
+                except Exception:
+                    pass
+        except _FuturesTimeout:
+            bt.logging.warning("Blacklist check timeout (15s) — proceeding with partial results")
 
     def _resolve_uid(self, evm_address: str) -> Optional[int]:
         """Resolve EVM address to Bittensor UID.
@@ -3009,6 +3118,9 @@ def main():
                 except Exception:
                     pass
         bt.logging.info(f"Startup discovery: {len(neuron._epoch_miners)} miners enriched")
+        # Refresh blacklist at boot — without this, the first weight-set after
+        # restart fires before _close_epoch with an empty _blacklisted_uids set.
+        neuron._refresh_blacklist({m.address for m in neuron._epoch_miners})
     except Exception as e:
         bt.logging.debug(f"Startup discovery failed: {e} — shared state from DB only")
 
