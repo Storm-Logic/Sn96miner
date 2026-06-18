@@ -1241,6 +1241,7 @@ class ValidatorNeuron:
 
                 # Optional proof verification
                 proof_verified = False
+                proof_failure_reason = None
                 verify_timing = {}
                 if test.verify_proof:
                     try:
@@ -1319,6 +1320,7 @@ class ValidatorNeuron:
                         )
                         proof_verified = result.passed
                         if not proof_verified:
+                            proof_failure_reason = result.message
                             # Miner-side fault, not a validator problem — the
                             # detection + probation flow is the success path.
                             # DEBUG so prod dashboards don't page on miner faults.
@@ -1513,6 +1515,7 @@ class ValidatorNeuron:
                         tokens_per_sec=tokens_per_sec,
                         prompt_tokens=input_tokens,
                         proof_verified=1 if proof_verified else (0 if test.verify_proof else None),
+                        proof_failure_reason=proof_failure_reason,
                         prove_ms=timing.get("prove_ms"),
                         commitment_ms=timing.get("commitment_ms"),
                         verify_ms=sum(verify_timing.values()) if verify_timing else None,
