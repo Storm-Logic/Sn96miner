@@ -353,6 +353,8 @@ class ValidatorNeuron:
         self._epoch_miners: List[ActiveMiner] = []
         # {(miner_address, model_index): expected_receipt_count}
         self._expected_receipts: Dict[Tuple[str, int], int] = {}
+        # {epoch_number: {(miner_address, model_index): in_flight_count}}
+        self._inflight_canaries: Dict[int, Dict[Tuple[str, int], int]] = {}
         # {(miner_address, model_index): 503_skip_count} — reset each epoch
         self._busy_skips: Dict[Tuple[str, int], int] = {}
         # Miners that entered probation via busy-skips (not real proof failure)
@@ -799,6 +801,38 @@ class ValidatorNeuron:
         """Return True while a canary still belongs to the active epoch."""
         return self._running and epoch_number == self._current_epoch
 
+    def _mark_canary_started(self, epoch_number: int, key: Tuple[str, int]) -> None:
+        """Count a canary only once it actually starts running."""
+        self._expected_receipts[key] = self._expected_receipts.get(key, 0) + 1
+        epoch_inflight = self._inflight_canaries.setdefault(epoch_number, {})
+        epoch_inflight[key] = epoch_inflight.get(key, 0) + 1
+
+    def _mark_canary_finished(self, epoch_number: int, key: Tuple[str, int]) -> None:
+        """Clear in-flight accounting when a canary finishes or is abandoned."""
+        epoch_inflight = self._inflight_canaries.get(epoch_number)
+        if not epoch_inflight:
+            return
+        current = epoch_inflight.get(key, 0)
+        if current <= 1:
+            epoch_inflight.pop(key, None)
+        else:
+            epoch_inflight[key] = current - 1
+        if not epoch_inflight:
+            self._inflight_canaries.pop(epoch_number, None)
+
+    def _decrement_expected_receipt(self, epoch_number: int, key: Tuple[str, int]) -> None:
+        """Drop expected receipt count for active-epoch validator-side misses."""
+        if epoch_number != self._current_epoch:
+            return
+        if self._expected_receipts.get(key, 0) > 0:
+            self._expected_receipts[key] -= 1
+
+    def _effective_expected_receipts(self, epoch_number: int, key: Tuple[str, int]) -> int:
+        """Expected receipts minus canaries still in flight at close time."""
+        expected = self._expected_receipts.get(key, 0)
+        inflight = self._inflight_canaries.get(epoch_number, {}).get(key, 0)
+        return max(0, expected - inflight)
+
     def _do_epoch_setup(self, epoch_start_block: int, epoch_number: int):
         """Heavy epoch setup — runs on a background executor thread."""
         t0 = time.monotonic()
@@ -1232,64 +1266,66 @@ class ValidatorNeuron:
             return
 
         key = (test.miner_address, test.model_index)
-        self._expected_receipts[key] = self._expected_receipts.get(key, 0) + 1
+        self._mark_canary_started(epoch_number, key)
 
-        max_retries = 3
-        last_exc = None
-        for attempt in range(max_retries + 1):
-            if not self._canary_epoch_active(epoch_number):
-                bt.logging.debug(
-                    f"Aborting stale canary retry for {test.miner_address[:10]} "
-                    f"model_index={test.model_index}: test_epoch={epoch_number}, "
-                    f"current_epoch={self._current_epoch}"
-                )
-                return
-            try:
-                return self._execute_canary_test_once(
-                    test, epoch_number, _transport_retry_allowed=True,
-                )
-            except _httpx.HTTPStatusError as e:
-                if e.response.status_code == 503 and attempt < max_retries:
-                    wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
-                    bt.logging.info(f"Canary retry {attempt + 1}/{max_retries} (miner busy) for {test.miner_address[:10]}, waiting {wait}s")
+        try:
+            max_retries = 3
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                if not self._canary_epoch_active(epoch_number):
+                    bt.logging.debug(
+                        f"Aborting stale canary retry for {test.miner_address[:10]} "
+                        f"model_index={test.model_index}: test_epoch={epoch_number}, "
+                        f"current_epoch={self._current_epoch}"
+                    )
+                    return
+                try:
+                    return self._execute_canary_test_once(
+                        test, epoch_number, _transport_retry_allowed=True,
+                    )
+                except _httpx.HTTPStatusError as e:
+                    if e.response.status_code == 503 and attempt < max_retries:
+                        wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                        bt.logging.info(f"Canary retry {attempt + 1}/{max_retries} (miner busy) for {test.miner_address[:10]}, waiting {wait}s")
+                        import time as _time
+                        _time.sleep(wait)
+                        last_exc = e
+                        continue
+                    raise  # non-503 — let _execute_canary_test_once handle it
+                except transport_retry_exc as e:
+                    # One-shot transport retry — call inner again with
+                    # _transport_retry_allowed=False so a second failure falls
+                    # through to its normal error-bookkeeping path.
+                    _uid_tr = self._db.get_uid(test.miner_address)
+                    _uid_tr_s = f"UID {_uid_tr}" if _uid_tr is not None else "UID ?"
+                    bt.logging.info(
+                        f"Canary transport retry for {_uid_tr_s} {test.miner_address[:10]} "
+                        f"(type={test.test_type}): {type(e).__name__} — waiting 5s"
+                    )
                     import time as _time
-                    _time.sleep(wait)
-                    last_exc = e
-                    continue
-                raise  # non-503 — let _execute_canary_test_once handle it
-            except transport_retry_exc as e:
-                # One-shot transport retry — call inner again with
-                # _transport_retry_allowed=False so a second failure falls
-                # through to its normal error-bookkeeping path.
-                _uid_tr = self._db.get_uid(test.miner_address)
-                _uid_tr_s = f"UID {_uid_tr}" if _uid_tr is not None else "UID ?"
-                bt.logging.info(
-                    f"Canary transport retry for {_uid_tr_s} {test.miner_address[:10]} "
-                    f"(type={test.test_type}): {type(e).__name__} — waiting 5s"
-                )
-                import time as _time
-                _time.sleep(5)
-                return self._execute_canary_test_once(
-                    test, epoch_number, _transport_retry_allowed=False,
-                )
-            except Exception:
-                raise  # non-HTTP errors — let inner handler deal with it
+                    _time.sleep(5)
+                    return self._execute_canary_test_once(
+                        test, epoch_number, _transport_retry_allowed=False,
+                    )
+                except Exception:
+                    raise  # non-HTTP errors — let inner handler deal with it
 
-        # All retries exhausted on 503 — handle as busy skip
-        if last_exc is not None:
-            if not self._canary_epoch_active(epoch_number):
-                return
-            bt.logging.info(f"Canary failed after {max_retries} retries (miner busy) for {test.miner_address[:10]} model={test.model_id}")
-            reject_ts = int(time.time())
-            if key in self._expected_receipts and self._expected_receipts[key] > 0:
-                self._expected_receipts[key] -= 1
-            self._busy_skips[key] = self._busy_skips.get(key, 0) + 1
-            # Record 503 timestamp for temporal overlap check at epoch close
-            self._busy_skip_probations.setdefault(key, []).append(reject_ts)
-            if self._busy_skips[key] > 3:
-                # Logged only — penalty is deferred to epoch close where
-                # organic receipts can prove the miner was genuinely busy.
-                bt.logging.info(f"Miner {test.miner_address[:10]} model_index={test.model_index} returned 503 on {self._busy_skips[key]} canaries (>3 after retries) — will evaluate at epoch close")
+            # All retries exhausted on 503 — handle as busy skip
+            if last_exc is not None:
+                if not self._canary_epoch_active(epoch_number):
+                    return
+                bt.logging.info(f"Canary failed after {max_retries} retries (miner busy) for {test.miner_address[:10]} model={test.model_id}")
+                reject_ts = int(time.time())
+                self._decrement_expected_receipt(epoch_number, key)
+                self._busy_skips[key] = self._busy_skips.get(key, 0) + 1
+                # Record 503 timestamp for temporal overlap check at epoch close
+                self._busy_skip_probations.setdefault(key, []).append(reject_ts)
+                if self._busy_skips[key] > 3:
+                    # Logged only — penalty is deferred to epoch close where
+                    # organic receipts can prove the miner was genuinely busy.
+                    bt.logging.info(f"Miner {test.miner_address[:10]} model_index={test.model_index} returned 503 on {self._busy_skips[key]} canaries (>3 after retries) — will evaluate at epoch close")
+        finally:
+            self._mark_canary_finished(epoch_number, key)
 
     def _execute_canary_test_once(
         self,
@@ -1617,8 +1653,7 @@ class ValidatorNeuron:
                 )
                 if not pushed_ok:
                     _key_pf = (test.miner_address, test.model_index)
-                    if self._expected_receipts.get(_key_pf, 0) > 0:
-                        self._expected_receipts[_key_pf] -= 1
+                    self._decrement_expected_receipt(epoch_number, _key_pf)
 
                 _uid_c = self._db.get_uid(test.miner_address)
                 _uid_cs = f"UID {_uid_c}" if _uid_c is not None else "UID ?"
@@ -1735,8 +1770,7 @@ class ValidatorNeuron:
             key = (test.miner_address, test.model_index)
             self._canary_errors[key] = self._canary_errors.get(key, 0) + 1
             self._canary_error_times.setdefault(key, []).append(int(time.time()))
-            if key in self._expected_receipts and self._expected_receipts[key] > 0:
-                self._expected_receipts[key] -= 1
+            self._decrement_expected_receipt(epoch_number, key)
             if self._canary_errors[key] > 3:
                 bt.logging.info(
                     f"Miner {test.miner_address[:10]} model_index={test.model_index} "
@@ -2094,7 +2128,7 @@ class ValidatorNeuron:
             # Also migrate in DB (old_index is found automatically inside)
             # DB migrate_probation needs explicit old index; use tracker's side-effect
             # to keep them in sync.
-            expected = self._expected_receipts.get(key, 0)
+            expected = self._effective_expected_receipts(epoch_number, key)
 
             # Skip scoring if no canaries were dispatched AND no busy-skips.
             # The expected count is decremented on each 503, so expected==0
