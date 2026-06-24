@@ -77,6 +77,52 @@ from verallm.api.serialization import (
 )
 
 
+def _coerce_timing_ms(value: object) -> Optional[float]:
+    """Best-effort conversion for diagnostic miner timing fields."""
+    try:
+        timing_ms = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timing_ms < 0:
+        return None
+    return timing_ms
+
+
+def _remember_miner_inference_ms(timing: dict, value: object) -> None:
+    """Store miner-reported inference time as diagnostic-only metadata."""
+    timing_ms = _coerce_timing_ms(value)
+    if timing_ms is not None:
+        timing["miner_inference_ms"] = timing_ms
+
+
+def _finalize_validator_timing(
+    timing: dict,
+    request_start: float,
+    first_token_at: Optional[float],
+    last_token_at: Optional[float],
+    response_done_at: Optional[float] = None,
+) -> dict:
+    """Fill validator-measured wall-clock timing fields.
+
+    ``inference_ms`` is intentionally never copied from the miner.  It is the
+    validator's wall-clock duration from request start to the last streamed
+    token, falling back to full round-trip time when no token event arrived.
+    """
+    completed_at = response_done_at if response_done_at is not None else time.perf_counter()
+    round_trip_ms = max(0.0, (completed_at - request_start) * 1000)
+    timing["round_trip_ms"] = round_trip_ms
+
+    if first_token_at is not None:
+        timing["ttft_ms"] = max(0.0, (first_token_at - request_start) * 1000)
+
+    if last_token_at is not None:
+        timing["inference_ms"] = max(0.0, (last_token_at - request_start) * 1000)
+    else:
+        timing["inference_ms"] = round_trip_ms
+
+    return timing
+
+
 # ============================================================================
 # SSE parser
 # ============================================================================
@@ -413,6 +459,8 @@ class ValidatorClient:
         proof_bundle = None
         timing = {}
         t_first_token = None
+        t_last_token = None
+        t_done_recv = None
 
         t0 = time.perf_counter()
         with self.client.stream("POST", f"{self.miner_url}/inference",
@@ -420,13 +468,15 @@ class ValidatorClient:
             resp.raise_for_status()
             for event_type, data in _parse_sse_stream(resp):
                 if event_type == "token":
+                    t_last_token = time.perf_counter()
                     if t_first_token is None:
-                        t_first_token = time.perf_counter()
+                        t_first_token = t_last_token
                     token_text = data.get("text", "")
                     full_text += token_text
                     if stream_callback:
                         stream_callback(token_text)
                 elif event_type == "done":
+                    t_done_recv = time.perf_counter()
                     # TEE miners may return empty commitment/proof_bundle
                     commit_data = data.get("commitment", {})
                     proof_data = data.get("proof_bundle", {"layer_proofs": [], "sampling_proofs": []})
@@ -440,7 +490,7 @@ class ValidatorClient:
                             proof_bundle = dict_to_proof_bundle(proof_data)
                         except (TypeError, KeyError):
                             pass
-                    timing["inference_ms"] = data.get("inference_ms", 0)
+                    _remember_miner_inference_ms(timing, data.get("inference_ms"))
                     timing["commitment_ms"] = data.get("commitment_ms", 0)
                     timing["prove_ms"] = data.get("prove_ms", 0)
                     timing["beacon_ms"] = data.get("beacon_ms", 0)
@@ -450,9 +500,10 @@ class ValidatorClient:
                 elif event_type == "error":
                     raise RuntimeError(f"Miner error: {data.get('error', data)}")
 
-        timing["round_trip_ms"] = (time.perf_counter() - t0) * 1000
-        if t_first_token is not None:
-            timing["ttft_ms"] = (t_first_token - t0) * 1000
+        _finalize_validator_timing(
+            timing, t0, t_first_token, t_last_token,
+            response_done_at=t_done_recv,
+        )
 
         # TEE miners don't produce commitments/proofs — create empty defaults
         if commitment is None:
@@ -535,24 +586,31 @@ class ValidatorClient:
         proof_bundle = None
         timing = {}
         t_first_token = None
+        t_last_token = None
+        t_done_recv = None
 
         t0 = time.perf_counter()
-        _t_last_tok = time.perf_counter()
+        _t_last_tok = None
         with self.client.stream("POST", f"{self.miner_url}/chat",
                                 json=request_body) as resp:
             resp.raise_for_status()
             for event_type, data in _parse_sse_stream(resp):
                 if event_type == "token":
                     _t_last_tok = time.perf_counter()
+                    t_last_token = _t_last_tok
                     if t_first_token is None:
-                        t_first_token = time.perf_counter()
+                        t_first_token = _t_last_tok
                     token_text = data.get("text", "")
                     full_text += token_text
                     if stream_callback:
                         stream_callback(token_text)
                 elif event_type == "done":
                     _t_done_recv = time.perf_counter()
-                    _done_gap_ms = (_t_done_recv - _t_last_tok) * 1000
+                    t_done_recv = _t_done_recv
+                    _done_gap_ms = (
+                        (_t_done_recv - _t_last_tok) * 1000
+                        if _t_last_tok is not None else 0.0
+                    )
                     # TEE miners may return empty commitment/proof_bundle
                     commit_data = data.get("commitment", {})
                     proof_data = data.get("proof_bundle", {"layer_proofs": [], "sampling_proofs": []})
@@ -576,7 +634,7 @@ class ValidatorClient:
                         (_t_commit_deser - _t_done_recv) * 1000,
                         (_t_proof_deser - _t_commit_deser) * 1000,
                     )
-                    timing["inference_ms"] = data.get("inference_ms", 0)
+                    _remember_miner_inference_ms(timing, data.get("inference_ms"))
                     timing["commitment_ms"] = data.get("commitment_ms", 0)
                     timing["prove_ms"] = data.get("prove_ms", 0)
                     timing["beacon_ms"] = data.get("beacon_ms", 0)
@@ -586,9 +644,10 @@ class ValidatorClient:
                 elif event_type == "error":
                     raise RuntimeError(f"Miner error: {data.get('error', data)}")
 
-        timing["round_trip_ms"] = (time.perf_counter() - t0) * 1000
-        if t_first_token is not None:
-            timing["ttft_ms"] = (t_first_token - t0) * 1000
+        _finalize_validator_timing(
+            timing, t0, t_first_token, t_last_token,
+            response_done_at=t_done_recv,
+        )
 
         # TEE miners don't produce commitments/proofs — create empty defaults
         if commitment is None:
@@ -641,6 +700,9 @@ class ValidatorClient:
         encrypted_output = None
         encrypted_chunks: list[dict] = []
         timing = {}
+        t_first_token = None
+        t_last_token = None
+        t_done_recv = None
         t0 = time.perf_counter()
 
         with self.client.stream("POST", f"{self.miner_url}/tee/chat",
@@ -651,10 +713,14 @@ class ValidatorClient:
                     if stream_callback:
                         stream_callback(None)
                 elif event_type == "encrypted_token":
+                    t_last_token = time.perf_counter()
+                    if t_first_token is None:
+                        t_first_token = t_last_token
                     encrypted_chunks.append(data)
                     if stream_callback:
                         stream_callback(data)
                 elif event_type == "done":
+                    t_done_recv = time.perf_counter()
                     # TEE miners may return empty commitment/proof_bundle
                     commit_data = data.get("commitment", {})
                     proof_data = data.get("proof_bundle", {"layer_proofs": [], "sampling_proofs": []})
@@ -677,7 +743,7 @@ class ValidatorClient:
                         }
                     # Timing may be nested under "timing" key or flat
                     t = data.get("timing", data)
-                    timing["inference_ms"] = t.get("inference_ms", 0)
+                    _remember_miner_inference_ms(timing, t.get("inference_ms"))
                     timing["commitment_ms"] = t.get("commitment_ms", 0)
                     timing["prove_ms"] = t.get("prove_ms", 0)
                     timing["input_tokens"] = t.get("input_tokens", 0)
@@ -686,7 +752,10 @@ class ValidatorClient:
                 elif event_type == "error":
                     raise RuntimeError(f"Miner error: {data.get('error', data)}")
 
-        timing["round_trip_ms"] = (time.perf_counter() - t0) * 1000
+        _finalize_validator_timing(
+            timing, t0, t_first_token, t_last_token,
+            response_done_at=t_done_recv,
+        )
 
         # TEE miners don't produce commitments/proofs — create empty defaults
         if commitment is None:
@@ -2191,16 +2260,19 @@ class AsyncValidatorClient(ValidatorClient):
         proof_bundle = None
         timing = {}
         t_first_token = None
+        t_last_token = None
+        t_done_recv = None
 
         t0 = time.perf_counter()
-        t_last_tok = time.perf_counter()
+        t_last_tok = None
         async with self.client.stream("POST", f"{self.miner_url}/chat", json=request_body) as resp:
             resp.raise_for_status()
             async for event_type, data in _parse_sse_stream_async(resp):
                 if event_type == "token":
                     t_last_tok = time.perf_counter()
+                    t_last_token = t_last_tok
                     if t_first_token is None:
-                        t_first_token = time.perf_counter()
+                        t_first_token = t_last_tok
                     token_text = data.get("text", "")
                     full_text += token_text
                     if stream_callback:
@@ -2209,7 +2281,10 @@ class AsyncValidatorClient(ValidatorClient):
                             await maybe_awaitable
                 elif event_type == "done":
                     t_done_recv = time.perf_counter()
-                    done_gap_ms = (t_done_recv - t_last_tok) * 1000
+                    done_gap_ms = (
+                        (t_done_recv - t_last_tok) * 1000
+                        if t_last_tok is not None else 0.0
+                    )
                     commit_data = data.get("commitment", {})
                     proof_data = data.get("proof_bundle", {"layer_proofs": [], "sampling_proofs": []})
                     if commit_data:
@@ -2232,7 +2307,7 @@ class AsyncValidatorClient(ValidatorClient):
                         (t_commit_deser - t_done_recv) * 1000,
                         (t_proof_deser - t_commit_deser) * 1000,
                     )
-                    timing["inference_ms"] = data.get("inference_ms", 0)
+                    _remember_miner_inference_ms(timing, data.get("inference_ms"))
                     timing["commitment_ms"] = data.get("commitment_ms", 0)
                     timing["prove_ms"] = data.get("prove_ms", 0)
                     timing["beacon_ms"] = data.get("beacon_ms", 0)
@@ -2242,9 +2317,10 @@ class AsyncValidatorClient(ValidatorClient):
                 elif event_type == "error":
                     raise RuntimeError(f"Miner error: {data.get('error', data)}")
 
-        timing["round_trip_ms"] = (time.perf_counter() - t0) * 1000
-        if t_first_token is not None:
-            timing["ttft_ms"] = (t_first_token - t0) * 1000
+        _finalize_validator_timing(
+            timing, t0, t_first_token, t_last_token,
+            response_done_at=t_done_recv,
+        )
 
         if commitment is None:
             commitment = InferenceCommitment.empty()

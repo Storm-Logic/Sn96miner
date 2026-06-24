@@ -2,10 +2,10 @@
 
 After a validator verifies miner inference (POST /inference + proof check),
 it pushes a signed receipt to the miner via POST /epoch/receipt.  The receipt
-includes performance metrics (ttft, tok/s, tokens generated) measured by the
-validator and signed with its **Sr25519 hotkey** — the same key the metagraph
-publishes.  This anchors every receipt to a real, currently-active validator
-on the subnet.
+includes validator-measured latency/speed metrics (ttft, generation wall time,
+tok/s) and token counts from the verified response path, signed with its
+**Sr25519 hotkey** — the same key the metagraph publishes.  This anchors every
+receipt to a real, currently-active validator on the subnet.
 
 Miners accumulate receipts from ALL validators throughout an epoch.  At epoch
 boundary, validators pull the complete receipt batch from each miner via
