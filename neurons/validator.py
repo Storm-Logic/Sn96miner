@@ -127,6 +127,18 @@ def _normalize_health_hardware(hw: object) -> tuple[bool, dict[str, object]]:
     return True, normalized
 
 
+def _identity_verification_key(miner: ActiveMiner) -> tuple[str, str]:
+    """Stable key for one identity challenge across a miner's model entries."""
+    return (miner.address.lower(), miner.endpoint.rstrip("/"))
+
+
+def _group_miners_for_identity(miners: List[ActiveMiner]) -> Dict[tuple[str, str], List[ActiveMiner]]:
+    groups: Dict[tuple[str, str], List[ActiveMiner]] = {}
+    for miner in miners:
+        groups.setdefault(_identity_verification_key(miner), []).append(miner)
+    return groups
+
+
 # ---------------------------------------------------------------------------
 # Tokenizer cache for input commitment verification
 # ---------------------------------------------------------------------------
@@ -1025,49 +1037,67 @@ class ValidatorNeuron:
         # overall as_completed loop is wrapped in try/except so a single
         # unresponsive miner can never stall epoch start for others.
         verified_miners = []
+        identity_groups = _group_miners_for_identity(self._epoch_miners)
+        if len(identity_groups) < len(self._epoch_miners):
+            bt.logging.info(
+                f"Identity verification grouped {len(self._epoch_miners)} model entries "
+                f"into {len(identity_groups)} unique miner endpoints"
+            )
         id_futures = {}
-        for miner in self._epoch_miners:
-            future = self._control_executor.submit(self._verify_miner_identity, miner)
-            id_futures[future] = miner
+        for miners in identity_groups.values():
+            representative = miners[0]
+            future = self._control_executor.submit(self._verify_miner_identity, representative)
+            id_futures[future] = (representative, miners)
 
         # Overall deadline: scales with miner count / pool workers, but capped
         # at 120s.  Beyond that we're better off including unverified miners
         # (canary proofs will catch any bad actors) than delaying epoch start.
-        _id_batches = len(self._epoch_miners) // self.config.max_concurrent_verifications + 1
+        _id_batches = len(identity_groups) // self.config.max_concurrent_verifications + 1
+        _id_batch_budget = max(3.0, min(self.config.identity_challenge_timeout + 5.0, 15.0))
         overall_deadline = min(120, max(
             self.config.identity_challenge_timeout + 10,
-            _id_batches * 3 + 10,  # ~3s per batch (most pass fast) + 10s grace
+            _id_batches * _id_batch_budget + 10,
         ))
         completed_futures = set()
         try:
             for future in as_completed(id_futures, timeout=overall_deadline):
                 completed_futures.add(future)
-                miner = id_futures[future]
+                miner, grouped_miners = id_futures[future]
                 try:
                     result = future.result()
                     if result is False:
-                        bt.logging.info(f"Identity FAILED for {miner.address[:10]} at {miner.endpoint} — excluding from epoch")
+                        bt.logging.info(
+                            f"Identity FAILED for {miner.address[:10]} at {miner.endpoint} — "
+                            f"excluding {len(grouped_miners)} model entr{'y' if len(grouped_miners) == 1 else 'ies'} from epoch"
+                        )
                         # Dispatch chain call to executor — wait_for_transaction_receipt
                         # blocks up to 360s per call (3×120s retries) and would stall the
                         # main loop while we wait.  Background task logs its own outcome.
                         self._control_executor.submit(self._report_offline, miner)
                         continue
                     if result is None and self.config.identity_challenge_required:
-                        bt.logging.info(f"Identity UNSUPPORTED for {miner.address[:10]} at {miner.endpoint} — excluding (required mode)")
+                        bt.logging.info(
+                            f"Identity UNSUPPORTED for {miner.address[:10]} at {miner.endpoint} — "
+                            f"excluding {len(grouped_miners)} model entr{'y' if len(grouped_miners) == 1 else 'ies'} (required mode)"
+                        )
                         continue
-                    verified_miners.append(miner)
+                    verified_miners.extend(grouped_miners)
                 except Exception as e:
-                    bt.logging.info(f"Identity check error for {miner.address[:10]}: {e} — including miner")
-                    verified_miners.append(miner)
+                    bt.logging.info(
+                        f"Identity check error for {miner.address[:10]}: {e} — "
+                        f"including {len(grouped_miners)} model entr{'y' if len(grouped_miners) == 1 else 'ies'}"
+                    )
+                    verified_miners.extend(grouped_miners)
         except _FuturesTimeout:
             # One or more futures didn't finish in time — exclude them from
             # this epoch but continue with the verified ones.  This prevents
             # a single stalled miner from blocking canary dispatch for all.
-            stalled = [id_futures[f].address[:10] for f in id_futures if f not in completed_futures]
+            stalled = [id_futures[f][0].address[:10] for f in id_futures if f not in completed_futures]
+            stalled_entries = sum(len(id_futures[f][1]) for f in id_futures if f not in completed_futures)
             bt.logging.warning(
                 f"Identity verification timeout after {overall_deadline}s — "
-                f"{len(stalled)} miner(s) stalled: {stalled}. "
-                f"Proceeding with {len(verified_miners)} verified miners."
+                f"{len(stalled)} unique miner endpoint(s) stalled ({stalled_entries} model entries): {stalled}. "
+                f"Proceeding with {len(verified_miners)} verified model entries."
             )
             # Cancel stalled futures so threads can be reused
             for f in id_futures:
@@ -2984,10 +3014,10 @@ class ValidatorNeuron:
             except Exception as _ide:
                 bt.logging.debug(f"Identity challenge exception for {miner.address[:10]}: {_ide}")
             if attempt < max_attempts and time.monotonic() < deadline:
-                wait = min(30, deadline - time.monotonic())
+                wait = min(2.0, 0.25 * attempt, deadline - time.monotonic())
                 if wait <= 0:
                     break
-                bt.logging.debug(f"Identity challenge retry {attempt}/{max_attempts} for {miner.address[:10]}, next in {wait:.0f}s")
+                bt.logging.debug(f"Identity challenge retry {attempt}/{max_attempts} for {miner.address[:10]}, next in {wait:.2f}s")
                 time.sleep(wait)
 
         if resp is None or resp.status_code != 200:
