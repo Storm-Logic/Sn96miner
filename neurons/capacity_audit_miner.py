@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -1796,13 +1797,34 @@ class CapacityAuditMinerWorker:
                     f"type={artifact_type}"
                 )
                 return
-            for base in validator_urls:
+
+            def _post(base: str):
                 try:
                     resp = httpx.post(
                         f"{base}{path}",
                         json=artifact,
                         timeout=5.0,
                     )
+                    return base, resp, None
+                except Exception as exc:
+                    return base, None, exc
+
+            with ThreadPoolExecutor(max_workers=max(1, len(validator_urls))) as executor:
+                future_map = {executor.submit(_post, base): base for base in validator_urls}
+                for future in as_completed(future_map):
+                    base = future_map[future]
+                    try:
+                        base, resp, exc = future.result()
+                    except Exception as exc:  # defensive; _post should capture transport errors
+                        resp = None
+                    if exc is not None or resp is None:
+                        bt.logging.warning(
+                            f"Capacity audit publish error: audit_id={audit_id[:12]} "
+                            f"type={artifact_type} url={base}{path}: {exc}"
+                        )
+                        self._record_validator_publish_result(base, False, failure_kind="transient")
+                        pending.append(base)
+                        continue
                     if resp.status_code < 300:
                         self._record_validator_publish_result(base, True)
                         continue
@@ -1825,13 +1847,6 @@ class CapacityAuditMinerWorker:
                         )
                     if retryable:
                         pending.append(base)
-                except Exception as exc:
-                    bt.logging.warning(
-                        f"Capacity audit publish error: audit_id={audit_id[:12]} "
-                        f"type={artifact_type} url={base}{path}: {exc}"
-                    )
-                    self._record_validator_publish_result(base, False, failure_kind="transient")
-                    pending.append(base)
             if not pending or attempt + 1 >= max(1, int(attempts)):
                 return
             time.sleep(max(0.1, float(retry_delay_s)))
