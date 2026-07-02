@@ -915,6 +915,9 @@ def step_model(net_info: dict, capacity_audit_env: Optional[dict[str, str]] = No
                 if filtered:
                     recs = filtered
                     print(f"  Filtered to {len(recs)} on-chain registered models")
+                    if capacity_audit_required:
+                        from neurons.model_resolve import _capacity_eligible_recommendations_from_ranked
+                        recs = _capacity_eligible_recommendations_from_ranked(recs)
         except Exception:
             pass  # chain query failed — show all recommendations
 
@@ -923,17 +926,31 @@ def step_model(net_info: dict, capacity_audit_env: Optional[dict[str, str]] = No
         return {"model_id": "auto", "category": None}
 
     if capacity_audit_required:
-        r = recs[0]
-        print("  Hot-capacity audit eligible model:")
-        print(
-            f"    {r.model.name} ({r.quant}, ctx={r.est_context:,}, "
-            f"checkpoint={r.config.checkpoint})"
-        )
-        return {
-            "model_id": r.config.checkpoint,
-            "quant": r.quant,
-            "category": None,
-        }
+        print("  Hot-capacity audit eligible models:")
+        for i, r in enumerate(recs, 1):
+            print(
+                f"    [{i}] {r.model.name} ({r.quant}, ctx={r.est_context:,}, "
+                f"checkpoint={r.config.checkpoint})"
+            )
+        if len(recs) == 1:
+            r = recs[0]
+            return {
+                "model_id": r.config.checkpoint,
+                "quant": r.quant,
+                "category": None,
+            }
+        while True:
+            choice = _prompt("Select model", "1").strip()
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(recs):
+                    r = recs[idx]
+                    return {
+                        "model_id": r.config.checkpoint,
+                        "quant": r.quant,
+                        "category": None,
+                    }
+            print(red(f"  Invalid selection. Enter 1-{len(recs)}."))
 
     # Show top recommendations
     print(f"  Recommended models:")

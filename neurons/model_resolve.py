@@ -17,6 +17,8 @@ from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
+CAPACITY_RECOMMENDATION_MIN_UTILITY_RATIO = 0.90
+
 
 @dataclass
 class ResolvedModel:
@@ -38,6 +40,7 @@ class RecommendedCapacityModel:
     max_context_len: int
     tier_name: str
     registry_id: str
+    utility: float = 0.0
 
 
 def vram_tier_for_gb(vram_gb: int):
@@ -72,28 +75,76 @@ def _filter_capacity_recommendations(recs, on_chain_models: Optional[Iterable[st
     ]
 
 
+def _capacity_eligible_recommendations_from_ranked(
+    recs,
+    *,
+    min_utility_ratio: float = CAPACITY_RECOMMENDATION_MIN_UTILITY_RATIO,
+):
+    ranked = list(recs)
+    if not ranked:
+        return []
+    top_utility = float(getattr(ranked[0], "utility", 0.0) or 0.0)
+    if top_utility <= 0.0:
+        return ranked[:1]
+    threshold = top_utility * max(0.0, min(float(min_utility_ratio), 1.0))
+    return [
+        r for r in ranked
+        if float(getattr(r, "utility", 0.0) or 0.0) >= threshold
+    ]
+
+
+def _recommendation_to_capacity_model(rec, tier) -> RecommendedCapacityModel:
+    return RecommendedCapacityModel(
+        model_id=str(rec.config.checkpoint),
+        quant=str(rec.quant),
+        max_context_len=int(rec.est_context or 0),
+        tier_name=str(tier.name),
+        registry_id=str(rec.model.id),
+        utility=float(getattr(rec, "utility", 0.0) or 0.0),
+    )
+
+
+def eligible_capacity_models_for_vram(
+    vram_gb: int,
+    *,
+    on_chain_models: Optional[Iterable[str]] = None,
+    min_utility_ratio: float = CAPACITY_RECOMMENDATION_MIN_UTILITY_RATIO,
+) -> list[RecommendedCapacityModel]:
+    from verallm.registry import recommend_models
+
+    tier = vram_tier_for_gb(int(vram_gb or 0))
+    if tier is None:
+        return []
+    recs = recommend_models(tier, verified_only=True)
+    recs = _filter_capacity_recommendations(recs, on_chain_models)
+    if not recs:
+        return []
+    eligible = _capacity_eligible_recommendations_from_ranked(
+        recs,
+        min_utility_ratio=min_utility_ratio,
+    )
+    return [_recommendation_to_capacity_model(r, tier) for r in eligible]
+
+
 def recommended_capacity_model_for_vram(
     vram_gb: int,
     *,
     on_chain_models: Optional[Iterable[str]] = None,
 ) -> RecommendedCapacityModel | None:
-    from verallm.registry import recommend_models
-
-    tier = vram_tier_for_gb(int(vram_gb or 0))
-    if tier is None:
-        return None
-    recs = recommend_models(tier, verified_only=True)
-    recs = _filter_capacity_recommendations(recs, on_chain_models)
-    if not recs:
-        return None
-    best = recs[0]
-    return RecommendedCapacityModel(
-        model_id=str(best.config.checkpoint),
-        quant=str(best.quant),
-        max_context_len=int(best.est_context or 0),
-        tier_name=str(tier.name),
-        registry_id=str(best.model.id),
+    eligible = eligible_capacity_models_for_vram(
+        vram_gb,
+        on_chain_models=on_chain_models,
     )
+    return eligible[0] if eligible else None
+
+
+def _format_capacity_expected(eligible: list[RecommendedCapacityModel]) -> str:
+    shown = [
+        f"{e.model_id} quant={e.quant} ctx>={e.max_context_len}"
+        for e in eligible[:4]
+    ]
+    suffix = f" (+{len(eligible) - 4} more)" if len(eligible) > 4 else ""
+    return "; ".join(shown) + suffix
 
 
 def validate_capacity_recommended_model(
@@ -104,32 +155,46 @@ def validate_capacity_recommended_model(
     vram_gb: int,
     on_chain_models: Optional[Iterable[str]] = None,
 ) -> tuple[bool, str, RecommendedCapacityModel | None]:
-    expected = recommended_capacity_model_for_vram(
+    eligible = eligible_capacity_models_for_vram(
         int(vram_gb or 0),
         on_chain_models=on_chain_models,
     )
-    if expected is None:
+    if not eligible:
         return False, f"no verified recommended model for {int(vram_gb or 0)}GB VRAM", None
-    if str(model_id or "").lower() != expected.model_id.lower():
+    checkpoint_matches = [
+        e for e in eligible
+        if str(model_id or "").lower() == e.model_id.lower()
+    ]
+    if not checkpoint_matches:
         return (
             False,
-            f"capacity audit requires {expected.model_id} on {expected.tier_name}",
-            expected,
+            f"capacity audit requires one of: {_format_capacity_expected(eligible)}",
+            eligible[0],
         )
-    if str(quant or "").lower() != expected.quant.lower():
+    quant_matches = [
+        e for e in checkpoint_matches
+        if str(quant or "").lower() == e.quant.lower()
+    ]
+    if not quant_matches:
+        expected = checkpoint_matches[0]
         return (
             False,
             f"capacity audit requires quant={expected.quant} for {expected.model_id}",
             expected,
         )
-    if int(max_context_len or 0) < int(expected.max_context_len or 0):
+    context_matches = [
+        e for e in quant_matches
+        if int(max_context_len or 0) >= int(e.max_context_len or 0)
+    ]
+    if not context_matches:
+        expected = quant_matches[0]
         return (
             False,
             f"capacity audit requires max_context_len>={expected.max_context_len} "
             f"for {expected.model_id}",
             expected,
         )
-    return True, "", expected
+    return True, "", context_matches[0]
 
 
 def _get_on_chain_models(chain_config_path: str, subtensor_network: Optional[str] = None) -> Optional[list[str]]:
@@ -283,6 +348,8 @@ def resolve_model_config(
             cat_str = f" for category '{category}'" if category else ""
             bt.logging.error(f"No models fit GPU tier {tier.name}{cat_str}")
             sys.exit(1)
+        if capacity_audit_required:
+            recs = _capacity_eligible_recommendations_from_ranked(recs)
 
         # Show top 5 recommendations
         bt.logging.info("Top model recommendations:")

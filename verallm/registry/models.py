@@ -1975,6 +1975,7 @@ ALL_MODELS: tuple[ModelEntry, ...] = (
         total_params_b=27.0, active_params_b=27.0,
         native_context_len=262144,
         generation_quality=1.05,
+        verified_inference=True,
         family="qwen3.6", provider="Community (huihui-ai/shawnw3i)",
         notes="Abliterated (refusal direction removed) variant of Qwen3.6-27B; "
               "no built-in safety refusals; same architecture as base; "
