@@ -2636,7 +2636,7 @@ class ValidatorNeuron:
         return (
             "capacity-audit model gate: "
             f"{reason}; expected model={expected.model_id} "
-            f"quant={expected.quant} ctx>={expected.max_context_len}"
+            f"quant={expected.quant}"
         )
 
     def _capacity_audit_score_gate_reason(

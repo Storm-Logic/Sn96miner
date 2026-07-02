@@ -1700,7 +1700,7 @@ def main():
                 if expected is not None:
                     expected_text = (
                         f" expected model={expected.model_id} "
-                        f"quant={expected.quant} ctx>={expected.max_context_len}"
+                        f"quant={expected.quant}"
                     )
                 bt.logging.error(f"{reason}.{expected_text}")
                 sys.exit(1)

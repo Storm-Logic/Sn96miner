@@ -140,7 +140,7 @@ def recommended_capacity_model_for_vram(
 
 def _format_capacity_expected(eligible: list[RecommendedCapacityModel]) -> str:
     shown = [
-        f"{e.model_id} quant={e.quant} ctx>={e.max_context_len}"
+        f"{e.model_id} quant={e.quant}"
         for e in eligible[:4]
     ]
     suffix = f" (+{len(eligible) - 4} more)" if len(eligible) > 4 else ""
@@ -182,19 +182,7 @@ def validate_capacity_recommended_model(
             f"capacity audit requires quant={expected.quant} for {expected.model_id}",
             expected,
         )
-    context_matches = [
-        e for e in quant_matches
-        if int(max_context_len or 0) >= int(e.max_context_len or 0)
-    ]
-    if not context_matches:
-        expected = quant_matches[0]
-        return (
-            False,
-            f"capacity audit requires max_context_len>={expected.max_context_len} "
-            f"for {expected.model_id}",
-            expected,
-        )
-    return True, "", context_matches[0]
+    return True, "", quant_matches[0]
 
 
 def _get_on_chain_models(chain_config_path: str, subtensor_network: Optional[str] = None) -> Optional[list[str]]:
@@ -425,7 +413,7 @@ def resolve_model_config(
                 if expected is not None:
                     expected_text = (
                         f" expected model={expected.model_id} "
-                        f"quant={expected.quant} ctx>={expected.max_context_len}"
+                        f"quant={expected.quant}"
                     )
                 bt.logging.error(f"{reason}.{expected_text}")
                 sys.exit(1)
@@ -537,7 +525,7 @@ def resolve_model_config(
             if expected is not None:
                 expected_text = (
                     f" expected model={expected.model_id} "
-                    f"quant={expected.quant} ctx>={expected.max_context_len}"
+                    f"quant={expected.quant}"
                 )
             bt.logging.error(f"{reason}.{expected_text}")
             sys.exit(1)
