@@ -556,11 +556,14 @@ class ValidatorNeuron:
         current_epoch: int | None = None,
         action: str | None = None,
     ) -> bool:
-        cfg: MaintenanceGraceConfig = getattr(
-            self,
-            "_maintenance_grace_cfg",
-            maintenance_grace_config_from_neuron_config(self.config),
-        )
+        cfg = getattr(self, "_maintenance_grace_cfg", None)
+        if cfg is None:
+            base_config = getattr(self, "config", None)
+            cfg = (
+                maintenance_grace_config_from_neuron_config(base_config)
+                if base_config is not None
+                else MaintenanceGraceConfig()
+            )
         epoch = current_epoch
         if epoch is None:
             epoch = getattr(self, "_current_epoch", None)
@@ -571,11 +574,14 @@ class ValidatorNeuron:
         return bool(getattr(cfg, action, False))
 
     def _maintenance_grace_reason(self) -> str:
-        cfg: MaintenanceGraceConfig = getattr(
-            self,
-            "_maintenance_grace_cfg",
-            maintenance_grace_config_from_neuron_config(self.config),
-        )
+        cfg = getattr(self, "_maintenance_grace_cfg", None)
+        if cfg is None:
+            base_config = getattr(self, "config", None)
+            cfg = (
+                maintenance_grace_config_from_neuron_config(base_config)
+                if base_config is not None
+                else MaintenanceGraceConfig()
+            )
         return cfg.reason or "maintenance grace"
 
     @property
