@@ -383,7 +383,11 @@ class CapacityAuditRuntimeConfig:
     repeat_window_epochs: int = 20
     timing_misses_for_zero_score: int = 2
     hard_proof_misses_for_zero_score: int = 2
+    invalid_proof_misses_for_zero_score: int = 1
     allow_timing_only_score_gate: bool = True
+    uid_escalation_min_entries: int = 2
+    uid_escalation_fraction: float = 0.10
+    uid_escalation_max_entries: int = 10
     validator_urls: tuple[str, ...] = ()
     gpu_classes: tuple[CapacityGpuClass, ...] = DEFAULT_GPU_CLASSES
 
@@ -409,6 +413,30 @@ def validate_capacity_audit_runtime_config(
     max_payload = int(getattr(cfg, "max_proof_payload_bytes", 0) or 0)
     if max_payload <= 0:
         raise ValueError("capacity audit max_proof_payload_bytes must be positive")
+    uid_fraction = float(getattr(cfg, "uid_escalation_fraction", 0.0) or 0.0)
+    if uid_fraction < 0.0 or uid_fraction > 1.0:
+        raise ValueError("capacity audit uid_escalation_fraction must be between 0.0 and 1.0")
+    uid_min = int(getattr(cfg, "uid_escalation_min_entries", 0) or 0)
+    uid_max = int(getattr(cfg, "uid_escalation_max_entries", 0) or 0)
+    if uid_min < 1:
+        raise ValueError("capacity audit uid_escalation_min_entries must be positive")
+    if uid_max < uid_min:
+        raise ValueError(
+            "capacity audit uid_escalation_max_entries must be greater than or equal to "
+            "uid_escalation_min_entries"
+        )
+
+
+def capacity_audit_uid_escalation_threshold(
+    entry_count: int,
+    cfg: CapacityAuditRuntimeConfig,
+) -> int:
+    """Return the distinct convicted-entry quorum for UID-wide score zeroing."""
+    count = max(1, int(entry_count or 0))
+    proportional = int(math.ceil(count * float(cfg.uid_escalation_fraction)))
+    threshold = max(int(cfg.uid_escalation_min_entries), proportional)
+    threshold = min(int(cfg.uid_escalation_max_entries), threshold)
+    return min(count, threshold)
 
 
 @dataclass(frozen=True)

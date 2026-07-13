@@ -420,8 +420,20 @@ def build_default_subnet_config_payload(
             "hard_proof_misses_for_zero_score": int(
                 neuron_config.capacity_audit_hard_proof_misses_for_zero_score
             ),
+            "invalid_proof_misses_for_zero_score": int(
+                neuron_config.capacity_audit_invalid_proof_misses_for_zero_score
+            ),
             "allow_timing_only_score_gate": bool(
                 neuron_config.capacity_audit_allow_timing_only_score_gate
+            ),
+            "uid_escalation_min_entries": int(
+                neuron_config.capacity_audit_uid_escalation_min_entries
+            ),
+            "uid_escalation_fraction": float(
+                neuron_config.capacity_audit_uid_escalation_fraction
+            ),
+            "uid_escalation_max_entries": int(
+                neuron_config.capacity_audit_uid_escalation_max_entries
             ),
             "slot_refresh_blocks": int(neuron_config.capacity_audit_slot_refresh_blocks),
             "slot_snapshot_stale_blocks": int(
@@ -508,6 +520,10 @@ def validate_subnet_config_payload(
     gpu_classes = _parse_gpu_classes(audit_data)
     audit_data_with_defaults = dict(audit_data)
     audit_data_with_defaults.setdefault("max_proof_payload_bytes", 32 * 1024 * 1024)
+    audit_data_with_defaults.setdefault("invalid_proof_misses_for_zero_score", 1)
+    audit_data_with_defaults.setdefault("uid_escalation_min_entries", 2)
+    audit_data_with_defaults.setdefault("uid_escalation_fraction", 0.10)
+    audit_data_with_defaults.setdefault("uid_escalation_max_entries", 10)
     capacity_audit = CapacityAuditRuntimeConfig(
         enabled=_require_bool(audit_data, "enabled"),
         mode=_require_str(
@@ -554,8 +570,25 @@ def validate_subnet_config_payload(
         hard_proof_misses_for_zero_score=_require_int(
             audit_data, "hard_proof_misses_for_zero_score", minimum=1
         ),
+        invalid_proof_misses_for_zero_score=_require_int(
+            audit_data_with_defaults,
+            "invalid_proof_misses_for_zero_score",
+            minimum=1,
+        ),
         allow_timing_only_score_gate=_require_bool(
             audit_data, "allow_timing_only_score_gate"
+        ),
+        uid_escalation_min_entries=_require_int(
+            audit_data_with_defaults, "uid_escalation_min_entries", minimum=1
+        ),
+        uid_escalation_fraction=_require_float(
+            audit_data_with_defaults,
+            "uid_escalation_fraction",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        uid_escalation_max_entries=_require_int(
+            audit_data_with_defaults, "uid_escalation_max_entries", minimum=1
         ),
         gpu_classes=gpu_classes,
     )
@@ -620,7 +653,13 @@ def validate_subnet_config_payload(
         "repeat_window_epochs": capacity_audit.repeat_window_epochs,
         "timing_misses_for_zero_score": capacity_audit.timing_misses_for_zero_score,
         "hard_proof_misses_for_zero_score": capacity_audit.hard_proof_misses_for_zero_score,
+        "invalid_proof_misses_for_zero_score": (
+            capacity_audit.invalid_proof_misses_for_zero_score
+        ),
         "allow_timing_only_score_gate": capacity_audit.allow_timing_only_score_gate,
+        "uid_escalation_min_entries": capacity_audit.uid_escalation_min_entries,
+        "uid_escalation_fraction": capacity_audit.uid_escalation_fraction,
+        "uid_escalation_max_entries": capacity_audit.uid_escalation_max_entries,
         "slot_refresh_blocks": slot_refresh_blocks,
         "slot_snapshot_stale_blocks": slot_snapshot_stale_blocks,
         "proof_verify_workers": proof_verify_workers,
@@ -717,8 +756,18 @@ def apply_runtime_config_to_neuron_config(
     config.capacity_audit_hard_proof_misses_for_zero_score = (
         audit.hard_proof_misses_for_zero_score
     )
+    config.capacity_audit_invalid_proof_misses_for_zero_score = (
+        audit.invalid_proof_misses_for_zero_score
+    )
     config.capacity_audit_allow_timing_only_score_gate = (
         audit.allow_timing_only_score_gate
+    )
+    config.capacity_audit_uid_escalation_min_entries = (
+        audit.uid_escalation_min_entries
+    )
+    config.capacity_audit_uid_escalation_fraction = audit.uid_escalation_fraction
+    config.capacity_audit_uid_escalation_max_entries = (
+        audit.uid_escalation_max_entries
     )
     config.capacity_audit_slot_refresh_blocks = (
         runtime.capacity_audit_slot_refresh_blocks
@@ -807,8 +856,20 @@ def capacity_audit_config_from_neuron_config(config: Any) -> CapacityAuditRuntim
         hard_proof_misses_for_zero_score=int(
             getattr(config, "capacity_audit_hard_proof_misses_for_zero_score", 2)
         ),
+        invalid_proof_misses_for_zero_score=int(
+            getattr(config, "capacity_audit_invalid_proof_misses_for_zero_score", 1)
+        ),
         allow_timing_only_score_gate=bool(
             getattr(config, "capacity_audit_allow_timing_only_score_gate", True)
+        ),
+        uid_escalation_min_entries=int(
+            getattr(config, "capacity_audit_uid_escalation_min_entries", 2)
+        ),
+        uid_escalation_fraction=float(
+            getattr(config, "capacity_audit_uid_escalation_fraction", 0.10)
+        ),
+        uid_escalation_max_entries=int(
+            getattr(config, "capacity_audit_uid_escalation_max_entries", 10)
         ),
         validator_urls=tuple(
             u.strip()

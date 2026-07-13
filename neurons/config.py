@@ -126,7 +126,11 @@ class NeuronConfig(ChainConfig):
     capacity_audit_repeat_window_epochs: int = 20
     capacity_audit_timing_misses_for_zero_score: int = 2
     capacity_audit_hard_proof_misses_for_zero_score: int = 2
+    capacity_audit_invalid_proof_misses_for_zero_score: int = 1
     capacity_audit_allow_timing_only_score_gate: bool = True
+    capacity_audit_uid_escalation_min_entries: int = 2
+    capacity_audit_uid_escalation_fraction: float = 0.10
+    capacity_audit_uid_escalation_max_entries: int = 10
     capacity_audit_slot_refresh_blocks: int = 0
     capacity_audit_slot_snapshot_stale_blocks: int = 0
     capacity_audit_proof_verify_workers: int = 4
@@ -208,7 +212,11 @@ class NeuronConfig(ChainConfig):
             "capacity_audit_repeat_window_epochs": "VERATHOS_CAPACITY_AUDIT_REPEAT_WINDOW_EPOCHS",
             "capacity_audit_timing_misses_for_zero_score": "VERATHOS_CAPACITY_AUDIT_TIMING_MISSES_FOR_ZERO_SCORE",
             "capacity_audit_hard_proof_misses_for_zero_score": "VERATHOS_CAPACITY_AUDIT_HARD_PROOF_MISSES_FOR_ZERO_SCORE",
+            "capacity_audit_invalid_proof_misses_for_zero_score": "VERATHOS_CAPACITY_AUDIT_INVALID_PROOF_MISSES_FOR_ZERO_SCORE",
             "capacity_audit_allow_timing_only_score_gate": "VERATHOS_CAPACITY_AUDIT_ALLOW_TIMING_ONLY_SCORE_GATE",
+            "capacity_audit_uid_escalation_min_entries": "VERATHOS_CAPACITY_AUDIT_UID_ESCALATION_MIN_ENTRIES",
+            "capacity_audit_uid_escalation_fraction": "VERATHOS_CAPACITY_AUDIT_UID_ESCALATION_FRACTION",
+            "capacity_audit_uid_escalation_max_entries": "VERATHOS_CAPACITY_AUDIT_UID_ESCALATION_MAX_ENTRIES",
             "capacity_audit_slot_refresh_blocks": "VERATHOS_CAPACITY_AUDIT_SLOT_REFRESH_BLOCKS",
             "capacity_audit_slot_snapshot_stale_blocks": "VERATHOS_CAPACITY_AUDIT_SLOT_SNAPSHOT_STALE_BLOCKS",
             "capacity_audit_proof_verify_workers": "VERATHOS_CAPACITY_AUDIT_PROOF_VERIFY_WORKERS",
@@ -223,6 +231,7 @@ class NeuronConfig(ChainConfig):
             "capacity_audit_payload_deadline_s",
             "capacity_audit_max_drain_fraction",
             "capacity_audit_group_stress_fraction",
+            "capacity_audit_uid_escalation_fraction",
             "capacity_audit_min_registration_age_s",
             "capacity_audit_worker_poll_s",
             "subnet_config_refresh_seconds", "subnet_config_timeout_seconds",
@@ -242,6 +251,9 @@ class NeuronConfig(ChainConfig):
             "capacity_audit_repeat_window_epochs",
             "capacity_audit_timing_misses_for_zero_score",
             "capacity_audit_hard_proof_misses_for_zero_score",
+            "capacity_audit_invalid_proof_misses_for_zero_score",
+            "capacity_audit_uid_escalation_min_entries",
+            "capacity_audit_uid_escalation_max_entries",
             "capacity_audit_slot_refresh_blocks",
             "capacity_audit_slot_snapshot_stale_blocks",
             "capacity_audit_proof_verify_workers",

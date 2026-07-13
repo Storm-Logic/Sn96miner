@@ -54,6 +54,7 @@ from neurons.capacity_audit import (
     CapacitySlot,
     PROTOCOL_VERSION,
     build_capacity_slot_group_key,
+    capacity_audit_uid_escalation_threshold,
     capacity_audit_window_fits_epoch,
     capacity_audit_window_triggered,
     capacity_gpu_pass_count,
@@ -1059,29 +1060,6 @@ class ValidatorNeuron:
             return list(getattr(self, "_epoch_miners", []) or [])
         if not miners:
             return list(getattr(self, "_epoch_miners", []) or [])
-        max_workers = min(32, max(1, len(miners)))
-        pool = ThreadPoolExecutor(max_workers=max_workers)
-        futures = [pool.submit(self._fetch_miner_hardware, m) for m in miners]
-        try:
-            try:
-                for future in as_completed(futures, timeout=20):
-                    try:
-                        future.result()
-                    except Exception:
-                        pass
-            except _FuturesTimeout:
-                stalled = sum(1 for future in futures if not future.done())
-                if stalled:
-                    bt.logging.warning(
-                        f"Capacity audit hardware refresh timed out with {stalled} pending endpoint(s)"
-                    )
-            except Exception:
-                pass
-        finally:
-            for future in futures:
-                if not future.done():
-                    future.cancel()
-            pool.shutdown(wait=False, cancel_futures=True)
         return miners
 
     def _store_capacity_audit_slot_snapshot(
@@ -1121,7 +1099,7 @@ class ValidatorNeuron:
     def _hydrate_capacity_audit_hardware_from_cache(
         self,
         miners: list[ActiveMiner],
-    ) -> None:
+    ) -> int:
         """Fill missing transient /health metadata from matching cached rows."""
         missing = [
             miner for miner in miners
@@ -1130,15 +1108,17 @@ class ValidatorNeuron:
             or int(getattr(miner, "vram_gb", 0) or 0) <= 0
         ]
         if not missing:
-            return
+            return 0
         try:
-            rows = self._db.get_active_entries()
+            cache_getter = getattr(self._db, "get_capacity_hardware_cache_entries", None)
+            rows = cache_getter() if callable(cache_getter) else self._db.get_active_entries()
         except Exception:
-            return
+            return 0
         by_key = {
             (str(row.get("address", "")).lower(), int(row.get("model_index", 0) or 0)): row
             for row in rows
         }
+        hydrated = 0
         for miner in missing:
             key = (str(getattr(miner, "address", "") or "").lower(), int(getattr(miner, "model_index", 0) or 0))
             row = by_key.get(key)
@@ -1147,6 +1127,12 @@ class ValidatorNeuron:
             if str(row.get("endpoint") or "") != str(getattr(miner, "endpoint", "") or ""):
                 continue
             if str(row.get("model_id") or "") != str(getattr(miner, "model_id", "") or ""):
+                continue
+            if str(row.get("quant") or "") != str(getattr(miner, "quant", "") or ""):
+                continue
+            if int(row.get("max_context_len") or 0) != int(
+                getattr(miner, "max_context_len", 0) or 0
+            ):
                 continue
             gpu_name = str(row.get("gpu_name") or "")
             gpu_count = int(row.get("gpu_count") or 0)
@@ -1162,6 +1148,110 @@ class ValidatorNeuron:
             except Exception:
                 uuids = []
             miner.gpu_uuids = uuids if isinstance(uuids, list) else []
+            hydrated += 1
+        return hydrated
+
+    @staticmethod
+    def _has_capacity_hardware(miner: ActiveMiner) -> bool:
+        return bool(
+            str(getattr(miner, "gpu_name", "") or "")
+            and int(getattr(miner, "gpu_count", 0) or 0) > 0
+            and int(getattr(miner, "vram_gb", 0) or 0) > 0
+        )
+
+    @staticmethod
+    def _hardware_fanout_deadline_s(
+        endpoint_count: int,
+        worker_count: int,
+        *,
+        per_request_timeout_s: float = 5.0,
+        grace_s: float = 5.0,
+        minimum_s: float = 10.0,
+        maximum_s: float = 120.0,
+    ) -> float:
+        workers = max(1, int(worker_count))
+        waves = max(1, (max(0, int(endpoint_count)) + workers - 1) // workers)
+        deadline = waves * max(0.001, float(per_request_timeout_s)) + max(0.0, float(grace_s))
+        return min(float(maximum_s), max(float(minimum_s), deadline))
+
+    def _refresh_miner_hardware_batch(
+        self,
+        miners: list[ActiveMiner],
+        *,
+        source: str,
+        max_workers: int = 32,
+        per_request_timeout_s: float = 5.0,
+        deadline_min_s: float = 10.0,
+        deadline_max_s: float = 120.0,
+    ) -> tuple[list[ActiveMiner], dict[str, int | float]]:
+        miners = list(miners or [])
+        if not miners:
+            return [], {
+                "active": 0,
+                "fetched": 0,
+                "invalid": 0,
+                "timed_out": 0,
+                "cancelled": 0,
+                "hydrated": 0,
+                "missing": 0,
+                "deadline_s": 0.0,
+            }
+
+        hydrated = self._hydrate_capacity_audit_hardware_from_cache(miners)
+        ordered = sorted(miners, key=self._has_capacity_hardware)
+        workers = min(max(1, int(max_workers)), len(ordered))
+        deadline_s = self._hardware_fanout_deadline_s(
+            len(ordered),
+            workers,
+            per_request_timeout_s=per_request_timeout_s,
+            minimum_s=deadline_min_s,
+            maximum_s=deadline_max_s,
+        )
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            pool.submit(self._fetch_miner_hardware_status, miner, per_request_timeout_s): miner
+            for miner in ordered
+        }
+        statuses: dict[int, str] = {}
+        timed_out = 0
+        cancelled = 0
+        try:
+            try:
+                for future in as_completed(futures, timeout=deadline_s):
+                    miner = futures[future]
+                    try:
+                        statuses[id(miner)] = str(future.result())
+                    except Exception:
+                        statuses[id(miner)] = "unavailable"
+            except _FuturesTimeout:
+                timed_out = sum(1 for future in futures if not future.done())
+        finally:
+            for future in futures:
+                if not future.done() and future.cancel():
+                    cancelled += 1
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        invalid = [miner for miner in miners if statuses.get(id(miner)) == "invalid"]
+        missing = sum(1 for miner in miners if not self._has_capacity_hardware(miner))
+        fetched = sum(1 for status in statuses.values() if status == "fetched")
+        stats: dict[str, int | float] = {
+            "active": len(miners),
+            "fetched": fetched,
+            "invalid": len(invalid),
+            "timed_out": timed_out,
+            "cancelled": cancelled,
+            "hydrated": hydrated,
+            "missing": missing,
+            "deadline_s": deadline_s,
+        }
+        log = bt.logging.warning if timed_out else bt.logging.info
+        log(
+            f"Capacity audit hardware refresh: source={source} active={len(miners)} "
+            f"fetched={fetched} hydrated={hydrated} invalid={len(invalid)} "
+            f"timed_out={timed_out} cancelled={cancelled} still_missing={missing} "
+            f"deadline_s={deadline_s:.1f}"
+        )
+        return invalid, stats
 
     def _request_capacity_audit_slot_snapshot_refresh(
         self,
@@ -1187,9 +1277,8 @@ class ValidatorNeuron:
         def _run() -> None:
             try:
                 miners = self._discover_capacity_audit_miners()
-                active = self._capacity_audit_active_slots(miners)
-                self._store_capacity_audit_slot_snapshot(
-                    active,
+                self._refresh_capacity_audit_slot_snapshot_from_miners(
+                    miners,
                     block_number=block,
                     source=f"async:{reason}",
                 )
@@ -1314,6 +1403,9 @@ class ValidatorNeuron:
             return {}
         selected_ids = {slot_id(slot) for slot in selected_slots}
         supported: dict[str, tuple[CapacitySlot, object]] = {}
+        resolved_count = 0
+        missing_hardware = 0
+        unsupported_hardware = 0
         for slot, gpu_row in list(active_snapshot or []):
             sid = slot_id(slot)
             if sid not in selected_ids or gpu_row is None:
@@ -1335,14 +1427,19 @@ class ValidatorNeuron:
                 continue
             row = by_key.get((slot.address_lower, int(slot.model_index)))
             if not row:
+                missing_hardware += 1
                 continue
             if str(row.get("endpoint") or "") != str(slot.endpoint or ""):
+                missing_hardware += 1
                 continue
             if str(row.get("model_id") or "") != str(slot.model_id or ""):
+                missing_hardware += 1
                 continue
             if str(row.get("quant") or "") != str(slot.quant or ""):
+                missing_hardware += 1
                 continue
             if int(row.get("max_context_len") or 0) != int(slot.max_context_len or 0):
+                missing_hardware += 1
                 continue
             gpu_name = str(row.get("gpu_name") or "")
             gpu_count = int(row.get("gpu_count") or 0)
@@ -1352,6 +1449,11 @@ class ValidatorNeuron:
                 resolved = self._capacity_audit_resolve_selected_slot_hardware(slot)
                 if resolved is not None:
                     supported[sid] = resolved
+                    resolved_count += 1
+                elif not gpu_name or gpu_count <= 0 or vram_gb <= 0:
+                    missing_hardware += 1
+                else:
+                    unsupported_hardware += 1
                 continue
             get_uid = getattr(self._db, "get_uid", None)
             try:
@@ -1380,6 +1482,12 @@ class ValidatorNeuron:
                 ),
             )
             supported[sid] = (supported_slot, gpu_row)
+        bt.logging.info(
+            f"Capacity audit selected-slot eligibility: selected={len(selected_slots)} "
+            f"eligible={len(supported)} resolved_live={resolved_count} "
+            f"missing_hardware={missing_hardware} "
+            f"unsupported_or_uncalibrated={unsupported_hardware}"
+        )
         return supported
 
     def _capacity_audit_resolve_selected_slot_hardware(
@@ -2716,53 +2824,106 @@ class ValidatorNeuron:
             )
             return ""
         since_epoch = max(0, int(epoch_number) - int(cfg.repeat_window_epochs) + 1)
-        uid_int: Optional[int]
-        try:
-            uid_int = int(uid) if uid is not None else None
-        except (TypeError, ValueError):
-            uid_int = None
-        if uid_int is None:
-            try:
-                resolved = self._db.get_uid(address)
-                uid_int = int(resolved) if resolved is not None else None
-            except Exception:
-                uid_int = None
-        if uid_int is not None:
-            hard_failures = self._db.recent_capacity_failures_for_uid(
-                uid_int,
-                since_epoch=since_epoch,
-                verdicts=("hard_proof_miss", "no_show"),
-                require_chain_confirmed=True,
-            )
-        else:
-            hard_failures = self._db.recent_capacity_failures(
-                address,
-                model_index,
-                since_epoch=since_epoch,
-                verdicts=("hard_proof_miss", "no_show"),
-                require_chain_confirmed=True,
-            )
+        invalid_failures = self._db.recent_invalid_capacity_proof_failures(
+            address,
+            model_index,
+            since_epoch=since_epoch,
+            require_chain_confirmed=True,
+        )
+        if invalid_failures >= int(cfg.invalid_proof_misses_for_zero_score):
+            return f"{invalid_failures} cryptographically invalid capacity proof(s)"
+        hard_failures = self._db.recent_capacity_failures(
+            address,
+            model_index,
+            since_epoch=since_epoch,
+            verdicts=("hard_proof_miss", "no_show"),
+            require_chain_confirmed=True,
+        )
         if hard_failures >= int(cfg.hard_proof_misses_for_zero_score):
             return f"{hard_failures} hard capacity-audit failures"
         if cfg.allow_timing_only_score_gate:
-            if uid_int is not None:
-                timing_failures = self._db.recent_capacity_failures_for_uid(
-                    uid_int,
-                    since_epoch=since_epoch,
-                    verdicts=("timing_miss",),
-                    require_chain_confirmed=True,
-                )
-            else:
-                timing_failures = self._db.recent_capacity_failures(
-                    address,
-                    model_index,
-                    since_epoch=since_epoch,
-                    verdicts=("timing_miss",),
-                    require_chain_confirmed=True,
-                )
+            timing_failures = self._db.recent_capacity_failures(
+                address,
+                model_index,
+                since_epoch=since_epoch,
+                verdicts=("timing_miss",),
+                require_chain_confirmed=True,
+            )
             if timing_failures >= int(cfg.timing_misses_for_zero_score):
                 return f"{timing_failures} timing capacity-audit misses"
         return ""
+
+    def _capacity_audit_uid_score_gate_reason(
+        self,
+        uid: Optional[int],
+        epoch_number: int,
+    ) -> str:
+        cfg = self._capacity_audit_cfg
+        if uid is None or not cfg.enabled or cfg.mode != "score_gate":
+            return ""
+        if not self._capacity_audit_enforcement_enabled(epoch_number):
+            return ""
+        if getattr(self, "_capacity_audit_verifier_unhealthy", False):
+            return ""
+        since_epoch = max(0, int(epoch_number) - int(cfg.repeat_window_epochs) + 1)
+        counts = self._db.recent_capacity_failure_counts_for_uid(
+            int(uid),
+            since_epoch=since_epoch,
+            require_chain_confirmed=True,
+        )
+        convicted: list[Tuple[str, int]] = []
+        for key, row in counts.items():
+            if int(row.get("invalid_proof_failures", 0)) >= int(
+                cfg.invalid_proof_misses_for_zero_score
+            ):
+                convicted.append(key)
+                continue
+            if int(row.get("hard_failures", 0)) >= int(
+                cfg.hard_proof_misses_for_zero_score
+            ):
+                convicted.append(key)
+                continue
+            if cfg.allow_timing_only_score_gate and int(
+                row.get("timing_failures", 0)
+            ) >= int(cfg.timing_misses_for_zero_score):
+                convicted.append(key)
+
+        active_count = self._db.active_entry_count_for_uid(int(uid))
+        evidence_entry_count = len(counts)
+        entry_count = max(active_count, evidence_entry_count)
+        if entry_count <= 1:
+            return ""
+        threshold = capacity_audit_uid_escalation_threshold(entry_count, cfg)
+        if len(convicted) < threshold:
+            return ""
+        return (
+            f"{len(convicted)}/{entry_count} distinct capacity-audit entries convicted "
+            f"(UID quorum={threshold})"
+        )
+
+    def _ensure_capacity_audit_entry_probation(
+        self,
+        address: str,
+        model_index: int,
+        uid: int,
+    ) -> None:
+        tracker = getattr(self, "_probation_tracker", None)
+        if tracker is None or self._maintenance_grace_active(action="suppress_probation"):
+            return
+        key = self._miner_model_key(address, model_index)
+        if tracker.is_on_probation(key):
+            return
+        endpoint = ""
+        for miner in getattr(self, "_epoch_miners", []) or []:
+            if (
+                str(getattr(miner, "address", "")).lower() == address.lower()
+                and int(getattr(miner, "model_index", -1)) == int(model_index)
+            ):
+                endpoint = str(getattr(miner, "endpoint", "") or "")
+                break
+        tracker.enter_probation(key, self._current_epoch, endpoint=endpoint)
+        self._db.enter_probation(address, model_index, self._current_epoch, uid=int(uid))
+        self._write_shared_state()
 
     def _apply_capacity_audit_score_gate(
         self,
@@ -2770,6 +2931,8 @@ class ValidatorNeuron:
         model_index: int,
         uid: int,
         reason: str,
+        *,
+        uid_wide: bool = False,
     ) -> bool:
         if not reason:
             return False
@@ -2784,7 +2947,19 @@ class ValidatorNeuron:
                 f"matched ({reason}) but UID {uid} has no score state to zero"
             )
             return False
-        for entry_model_index, entry in state.entries.items():
+        if uid_wide:
+            targets = list(state.entries.items())
+        else:
+            entry = state.entries.get(int(model_index))
+            if entry is None:
+                return False
+            targets = [(int(model_index), entry)]
+            self._ensure_capacity_audit_entry_probation(
+                address,
+                int(model_index),
+                int(uid),
+            )
+        for entry_model_index, entry in targets:
             if entry.ema_score != 0.0:
                 entry.ema_score = 0.0
             self._db.save_score(
@@ -2794,12 +2969,36 @@ class ValidatorNeuron:
                 entry.total_epochs,
                 entry.scored_epochs,
             )
+        scope = "UID" if uid_wide else "entry"
         bt.logging.info(
-            f"Capacity audit score gate: zeroed UID {uid} "
-            f"entries={len(state.entries)} trigger={address[:10]} model_index={model_index} "
+            f"Capacity audit score gate: zeroed {scope} {uid} "
+            f"entries={len(targets)} trigger={address[:10]} model_index={model_index} "
             f"({reason})"
         )
         return True
+
+    def _apply_capacity_audit_score_gates(
+        self,
+        address: str,
+        model_index: int,
+        uid: int,
+        entry_reason: str,
+        uid_reason: str,
+    ) -> bool:
+        entry_gated = self._apply_capacity_audit_score_gate(
+            address,
+            model_index,
+            uid,
+            entry_reason,
+        )
+        uid_gated = self._apply_capacity_audit_score_gate(
+            address,
+            model_index,
+            uid,
+            uid_reason,
+            uid_wide=True,
+        )
+        return entry_gated or uid_gated
 
     def _apply_capacity_audit_model_gate(
         self,
@@ -3658,24 +3857,19 @@ class ValidatorNeuron:
             self._canary_scheduler = None
             return
 
+        # Capacity admission is chain-derived. Best-effort /health metadata
+        # below may affect model eligibility, but never snapshot membership.
+        self._refresh_capacity_audit_slot_snapshot_from_miners(
+            self._epoch_miners,
+            block_number=epoch_start_block,
+            source="epoch_setup",
+        )
+
         # ── Fetch hardware metadata from miner /health (best-effort) ──
-        hw_futures = {}
-        for miner in self._epoch_miners:
-            future = self._control_executor.submit(self._fetch_miner_hardware, miner)
-            hw_futures[future] = miner
-        hardware_failed = []
-        try:
-            for future in as_completed(hw_futures, timeout=10):
-                miner = hw_futures[future]
-                try:
-                    if future.result() is False:
-                        hardware_failed.append(miner)
-                except Exception:
-                    pass  # Non-fatal — hardware metadata is optional
-        except _FuturesTimeout:
-            for f in hw_futures:
-                if not f.done():
-                    f.cancel()
+        hardware_failed, _hardware_stats = self._refresh_miner_hardware_batch(
+            self._epoch_miners,
+            source=f"epoch_setup:{epoch_number}",
+        )
 
         if hardware_failed:
             failed_ids = {id(m) for m in hardware_failed}
@@ -3708,12 +3902,6 @@ class ValidatorNeuron:
         if not self._epoch_miners:
             self._canary_scheduler = None
             return
-
-        self._refresh_capacity_audit_slot_snapshot_from_miners(
-            self._epoch_miners,
-            block_number=epoch_start_block,
-            source="epoch_setup",
-        )
 
         # Persist discovered miners to DB
         for miner in self._epoch_miners:
@@ -4839,6 +5027,10 @@ class ValidatorNeuron:
                 epoch_number,
                 uid=uid,
             )
+            audit_uid_score_gate_reason = self._capacity_audit_uid_score_gate_reason(
+                uid,
+                epoch_number,
+            )
 
             if key in getattr(self, "_receipt_pull_failed_keys", set()):
                 gated = self._apply_capacity_audit_model_gate(
@@ -4847,11 +5039,12 @@ class ValidatorNeuron:
                     uid,
                     model_gate_reason,
                 )
-                gated = self._apply_capacity_audit_score_gate(
+                gated = self._apply_capacity_audit_score_gates(
                     miner.address,
                     miner.model_index,
                     uid,
                     audit_score_gate_reason,
+                    audit_uid_score_gate_reason,
                 ) or gated
                 if not gated:
                     bt.logging.warning(
@@ -4873,11 +5066,12 @@ class ValidatorNeuron:
                     uid,
                     model_gate_reason,
                 )
-                gated = self._apply_capacity_audit_score_gate(
+                gated = self._apply_capacity_audit_score_gates(
                     miner.address,
                     miner.model_index,
                     uid,
                     audit_score_gate_reason,
+                    audit_uid_score_gate_reason,
                 ) or gated
                 if not gated:
                     bt.logging.info(f"Skipping score for {miner.address[:10]} model_index={miner.model_index} — 0 canaries dispatched")
@@ -4945,11 +5139,12 @@ class ValidatorNeuron:
                 uid,
                 model_gate_reason,
             )
-            gated = self._apply_capacity_audit_score_gate(
+            gated = self._apply_capacity_audit_score_gates(
                 miner.address,
                 miner.model_index,
                 uid,
                 audit_score_gate_reason,
+                audit_uid_score_gate_reason,
             ) or gated
             if gated:
                 epoch_score = 0.0
@@ -5847,32 +6042,35 @@ class ValidatorNeuron:
         bt.logging.info(f"Identity mismatch for {miner.endpoint}: expected {miner.address[:10]}, recovered {recovered[:10]}")
         return False
 
-    def _fetch_miner_hardware(self, miner: ActiveMiner) -> bool:
-        """Fetch hardware metadata from a miner's /health endpoint (best-effort).
-
-        Populates gpu_name, gpu_count, vram_gb, compute_capability on the
-        ActiveMiner object.  Non-fatal — old miners without the hardware
-        block simply keep empty defaults.
-        """
+    def _fetch_miner_hardware_status(
+        self,
+        miner: ActiveMiner,
+        timeout_s: float = 5.0,
+    ) -> str:
+        """Fetch hardware metadata and return a structured best-effort status."""
         try:
             resp = httpx.get(
                 f"{miner.endpoint.rstrip('/')}/health",
-                timeout=5.0, verify=False,
+                timeout=float(timeout_s), verify=False,
             )
             if resp.status_code != 200:
-                return True
+                return "unavailable"
             data = resp.json()
             if "hardware" not in data:
-                return True
+                return "missing"
             valid, hw = _normalize_health_hardware(data.get("hardware"))
             miner.gpu_name = hw["gpu_name"]
             miner.gpu_count = hw["gpu_count"]
             miner.vram_gb = hw["vram_gb"]
             miner.compute_capability = hw["compute_capability"]
             miner.gpu_uuids = hw["gpu_uuids"]
-            return valid
+            return "fetched" if valid else "invalid"
         except Exception:
-            return True  # Non-fatal
+            return "unavailable"
+
+    def _fetch_miner_hardware(self, miner: ActiveMiner) -> bool:
+        """Compatibility wrapper for callers that only distinguish invalid metadata."""
+        return self._fetch_miner_hardware_status(miner) != "invalid"
 
     # ------------------------------------------------------------------
     # Discovery + resolution
@@ -6887,6 +7085,14 @@ def parse_args():
                         help="Timing misses within the repeat window required to zero score in score_gate mode.")
     parser.add_argument("--capacity-audit-hard-proof-misses-for-zero-score", type=int, default=None,
                         help="Hard proof/no-show misses within the repeat window required to zero score in score_gate mode.")
+    parser.add_argument("--capacity-audit-invalid-proof-misses-for-zero-score", type=int, default=None,
+                        help="Cryptographically invalid proofs required to zero one endpoint score.")
+    parser.add_argument("--capacity-audit-uid-escalation-min-entries", type=int, default=None,
+                        help="Minimum independently convicted entries required for UID-wide zeroing.")
+    parser.add_argument("--capacity-audit-uid-escalation-fraction", type=float, default=None,
+                        help="Active-entry fraction independently convicted before UID-wide zeroing.")
+    parser.add_argument("--capacity-audit-uid-escalation-max-entries", type=int, default=None,
+                        help="Maximum independently convicted entries required for UID-wide zeroing.")
     timing_gate = parser.add_mutually_exclusive_group()
     timing_gate.add_argument("--capacity-audit-allow-timing-only-score-gate",
                              dest="capacity_audit_allow_timing_only_score_gate",
@@ -6960,6 +7166,14 @@ def main():
         extra_kwargs["capacity_audit_timing_misses_for_zero_score"] = args.capacity_audit_timing_misses_for_zero_score
     if args.capacity_audit_hard_proof_misses_for_zero_score is not None:
         extra_kwargs["capacity_audit_hard_proof_misses_for_zero_score"] = args.capacity_audit_hard_proof_misses_for_zero_score
+    if args.capacity_audit_invalid_proof_misses_for_zero_score is not None:
+        extra_kwargs["capacity_audit_invalid_proof_misses_for_zero_score"] = args.capacity_audit_invalid_proof_misses_for_zero_score
+    if args.capacity_audit_uid_escalation_min_entries is not None:
+        extra_kwargs["capacity_audit_uid_escalation_min_entries"] = args.capacity_audit_uid_escalation_min_entries
+    if args.capacity_audit_uid_escalation_fraction is not None:
+        extra_kwargs["capacity_audit_uid_escalation_fraction"] = args.capacity_audit_uid_escalation_fraction
+    if args.capacity_audit_uid_escalation_max_entries is not None:
+        extra_kwargs["capacity_audit_uid_escalation_max_entries"] = args.capacity_audit_uid_escalation_max_entries
     if args.capacity_audit_allow_timing_only_score_gate is not None:
         extra_kwargs["capacity_audit_allow_timing_only_score_gate"] = args.capacity_audit_allow_timing_only_score_gate
     config = NeuronConfig.from_env(
@@ -7057,14 +7271,11 @@ def main():
         )
         neuron._epoch_miners_discovery_valid = True
         neuron._enrich_miners_from_metagraph(neuron._epoch_miners)
-        # Fetch hardware metadata from miners at startup (best-effort)
-        from concurrent.futures import as_completed as _as_completed
-        _hw_futs = {neuron._control_executor.submit(neuron._fetch_miner_hardware, m): m for m in neuron._epoch_miners}
-        for f in _as_completed(_hw_futs, timeout=10):
-            try:
-                f.result()
-            except Exception:
-                pass
+        # Fetch hardware metadata from miners at startup (best-effort).
+        neuron._refresh_miner_hardware_batch(
+            neuron._epoch_miners,
+            source="startup",
+        )
         for miner in neuron._epoch_miners:
             neuron._db.upsert_entry(
                 address=miner.address, model_index=miner.model_index,
