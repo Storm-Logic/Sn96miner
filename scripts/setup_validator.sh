@@ -107,10 +107,14 @@ if [ "$SKIP_INSTALL" = false ]; then
     echo "Installing Python dependencies..."
     $PYTHON -m pip install --no-cache-dir -e ".[neurons]" 2>&1 | tail -20
 
-    # Pin async-substrate-interface <2: ASI 2.0 breaks bittensor 10.x
-    # (removes ScaleObj) and introduces scalecodec/cyscale namespace conflict.
-    # Force downgrade if 2.x was pulled transitively.
-    $PYTHON -m pip install --no-cache-dir 'async-substrate-interface>=1.6,<2' 2>&1 | tail -3
+    # Keep the SDK aligned with the current Subtensor metadata representation.
+    # Legacy substrate-interface/scalecodec conflicts with ASI 2.x/cyscale.
+    $PYTHON -m pip install --no-cache-dir --upgrade --force-reinstall \
+        'bittensor>=10.5,<10.6' \
+        'async-substrate-interface>=2.0.4,<3.0.0' \
+        'bittensor-drand>=2.0.0,<3.0.0' \
+        'bittensor-wallet>=4.1,<4.2' \
+        'bittensor-cli>=9.23,<10' 2>&1 | tail -10
 
     # Install zkllm wheel (required for verallm imports even without GPU)
     PY_VER=$($PYTHON -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")

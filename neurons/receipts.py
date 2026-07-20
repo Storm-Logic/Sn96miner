@@ -250,7 +250,7 @@ def sign_receipt(receipt: ServiceReceipt, hotkey_seed: bytes) -> ServiceReceipt:
     Returns:
         A new ServiceReceipt with ``validator_signature`` populated.
     """
-    from substrateinterface import Keypair
+    from bittensor_wallet import Keypair
 
     message = encode_receipt_message(receipt)
     keypair = Keypair.create_from_seed(hotkey_seed[:32].hex())
@@ -331,10 +331,9 @@ def verify_service_receipt(
         return False
 
     try:
-        from scalecodec.utils.ss58 import ss58_encode
-        from substrateinterface import Keypair
+        from bittensor_wallet import Keypair
 
-        ss58 = ss58_encode(receipt.validator_hotkey)
+        ss58 = Keypair(public_key=receipt.validator_hotkey, ss58_format=42).ss58_address
         if authority.lookup(ss58) is None:
             return False
         kp = Keypair(ss58_address=ss58)
@@ -374,10 +373,9 @@ def verify_receipt_timing_signature(receipt: ServiceReceipt) -> bool:
     if len(getattr(receipt, "timing_signature", b"") or b"") != 64:
         return False
     try:
-        from scalecodec.utils.ss58 import ss58_encode
-        from substrateinterface import Keypair
+        from bittensor_wallet import Keypair
 
-        ss58 = ss58_encode(receipt.validator_hotkey)
+        ss58 = Keypair(public_key=receipt.validator_hotkey, ss58_format=42).ss58_address
         kp = Keypair(ss58_address=ss58)
         return bool(kp.verify(encode_receipt_timing_message(receipt), receipt.timing_signature))
     except Exception:

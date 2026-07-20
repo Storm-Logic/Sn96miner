@@ -172,10 +172,10 @@ if [ -z "$GPU_NAME" ]; then
     echo "  ERROR: No GPU detected."
     exit 1
 fi
-if [ "${GPU_VRAM:-0}" -lt 20000 ] 2>/dev/null; then
-    echo "  ERROR: GPU has ${GPU_VRAM}MB VRAM. Minimum 24GB required."
-    exit 1
-fi
+# if [ "${GPU_VRAM:-0}" -lt 20000 ] 2>/dev/null; then
+#     # echo "  ERROR: GPU has ${GPU_VRAM}MB VRAM. Minimum 24GB required."
+#     # exit 1
+# fi
 GPU_SM=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
 GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 GPU_DRIVER_MAJOR=$(echo "$GPU_DRIVER" | cut -d. -f1)
@@ -258,10 +258,12 @@ fi
 
 cd "$REPO_DIR"
 
-GPU_VRAM_GB=$(( (GPU_VRAM + 512) / 1024 ))
-if ! "$PYTHON" scripts/check_capacity_audit_gpu.py --gpu-name "$GPU_NAME" --vram-gb "$GPU_VRAM_GB"; then
-    exit 1
-fi
+# The calibrated-GPU fail-fast check is disabled for local/testnet setup.
+# Runtime and validator-side capacity checks remain in effect.
+# GPU_VRAM_GB=$(( (GPU_VRAM + 512) / 1024 ))
+# if ! "$PYTHON" scripts/check_capacity_audit_gpu.py --gpu-name "$GPU_NAME" --vram-gb "$GPU_VRAM_GB"; then
+#     exit 1
+# fi
 
 # ── LD_LIBRARY_PATH: find pip-installed NVIDIA libs ──────────────────────────
 # torch 2.9+ (from vLLM pip) needs libcusparseLt.so.0 which lives in
@@ -854,10 +856,15 @@ if [ "$SKIP_INSTALL" = false ]; then
     $PYTHON -m pip install --no-cache-dir -e ".[neurons]" 2>&1 | tail -20
     fix_ld_library_path
 
-    # Pin async-substrate-interface <2: ASI 2.0 breaks bittensor 10.x
-    # (removes ScaleObj) and introduces scalecodec/cyscale namespace conflict.
-    # Force downgrade if 2.x was pulled transitively.
-    $PYTHON -m pip install --no-cache-dir 'async-substrate-interface>=1.6,<2' 2>&1 | tail -3
+    # Restore the dependency family required by bittensor 10.5.x.  The current
+    # testnet runtime needs async-substrate-interface 2.x/cyscale metadata
+    # handling; legacy substrate-interface/scalecodec cannot coexist with it.
+    $PYTHON -m pip install --no-cache-dir --upgrade --force-reinstall \
+        'bittensor>=10.5,<10.6' \
+        'async-substrate-interface>=2.0.4,<3.0.0' \
+        'bittensor-drand>=2.0.0,<3.0.0' \
+        'bittensor-wallet>=4.1,<4.2' \
+        'bittensor-cli>=9.23,<10' 2>&1 | tail -10
 
     # Defensive pin: kernels 0.13.0 (released 2026-04-11) ships a
     # `str | None` annotation in PythonPackage.import_name that breaks

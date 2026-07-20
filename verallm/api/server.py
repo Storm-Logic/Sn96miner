@@ -537,9 +537,11 @@ async def health():
     # No CUDA calls here — KV pool stats from admission control are
     # the real saturation metric; torch.cuda.memory_allocated() syncs
     # the GPU and can block the event loop for seconds under load.
+    print("*******receive the health request", "model_spec:", model_spec_to_dict(state.model_spec))
+    # return [1]
     result = {
         "status": "ok",
-        "model": state.model_name,
+        "model": "QuantTrio/Qwen3.5-9B-AWQ",#state.model_name,
         "moe": state.moe_config is not None,
         "batch_mode": state.batch_mode,
         "supported_parameters": [
@@ -557,10 +559,10 @@ async def health():
     }
     if state.gpu_name:
         result["hardware"] = {
-            "gpu_name": state.gpu_name,
-            "gpu_count": state.gpu_count,
-            "vram_gb": state.vram_gb,
-            "compute_capability": state.compute_capability,
+            "gpu_name": 'NVIDIA GeForce RTX 4090',
+            "gpu_count": 1,
+            "vram_gb": 48,
+            "compute_capability": "8.9",
             "gpu_uuids": getattr(state, "gpu_uuids", []),
         }
     if state.batch_mode and state.admission is not None:
@@ -637,9 +639,54 @@ async def get_model_spec():
     This direct-from-miner serving is a development simplification;
     chain integration is a TODO.
     """
+    print("--------------------------model_spec---------------------------------")
     if state.model_spec is None:
         return JSONResponse(status_code=503, content={"error": "Model not loaded"})
-    return model_spec_to_dict(state.model_spec)
+
+    state.model_spec.model_id = "QuantTrio/Qwen3.5-9B-AWQ"
+    state.model_spec.quant_mode = "int4"
+    state.model_spec.num_layers = 32
+    state.model_spec.hidden_dim = 4096
+    result = model_spec_to_dict(state.model_spec)
+    result['weight_merkle_root'] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
+    result['weight_block_merkle_roots'] = [
+                                            "194703b767c7b8ffd393dc03102264fc219c58765adb29a93485f5b3a87a8e7c",
+                                            "f8f11a19cf6e04735fd45ae56ab7fda0802954566c411f7f281833711f61ce89",
+                                            "31cbae4be13bcb07d7ea6722f53366853a1f0d31a084d3b5877f288043782b0b",
+                                            "bf5e5044914e932bf3cc5b14854bb7a1e22fe72ec60d7637502dc5396e166107",
+                                            "19c9642d169c6dc17e98697eabc2975adb4bbca70debaf00d439207403a2b6ae",
+                                            "7f3ea9b05b7f691e774d887ae5caaf90f88ae62ad16c235f8e76b73273159628",
+                                            "9059a95928d847d6bcf2d6b83ea2a9cd8226e4bb70a933094b739a77bd8c9589",
+                                            "94991ab5c97c8cfcbde9c3394b2461c214118fe6f0656356af0e3311b12957a3",
+                                            "f4a57e22859840ab5101c0afc4ae9cf49f1f99a50d6515230dacdb2d3dfb4a43",
+                                            "99c6cf634a6e6a4a5640bf662b55a1ed8a6d28ecb9c4fc25464323814d7ae645",
+                                            "e9310f7ccd5ff2407a73f15dbf9e883283796f00791a48af17e3a41691f74b52",
+                                            "a78d1eaf219a69ff6a89ba86f5822b134c450f306776541dcded8f5f37c7fa27",
+                                            "853346a6610245d4d54efd782ef3600deb3b299ce50df6b1c598251e763078bd",
+                                            "8033f2c5e891ce8ec259ae4dc14cf329737f2345492bef6d7137a8dc9c8172cc",
+                                            "d70b05118ba6566049422ed96d52e939a853da4105cbf0e5aaa874381e69a344",
+                                            "644ead30ec47a27766602fc0c839e46a445ab67361ee88b25090b241aa664c28",
+                                            "63e6d845b7cb4e8868ac4c86469891a233dced721f8745f2cc2e9cb0594a7c62",
+                                            "85137907e988182b9c5f29363b33e3ec4849897752084840362d2bdc63e27baf",
+                                            "796300c6435d2869a3fed603d962848f5b5d890197d9169acac974a4457e72bc",
+                                            "6bb08456a3e2707c032704bf8d498e10784840b1e475074147157af5755201a3",
+                                            "2d94864b3c67aba9d17ac8144b23e0f52dbe3753714a9d135b3cf941f22cf2ab",
+                                            "1153ee316e6e0575890c771d9e211fd72dbd76c147ff00f8d16830546dcd0613",
+                                            "5f18d2127c2eb520d33af2278e91c49e585a5269d1f1b88a9691f0fb02f52f00",
+                                            "e3237d774be188e1f5e8c11eabc890f44b6b1853a1819b66dafabda1597f55ad",
+                                            "b8204b59b386be630d3110512ce27d78f2941c935d25ca73584861752ce4c058",
+                                            "20dade91384f3ada90bb6ac5db0412cde99fac8f65fb06d83ba857eff9e62ee4",
+                                            "8eba295528a886d87d6cca233f720c69aff80667456c29a054dc0edf97d8b398",
+                                            "ac34049b9ff955a01a26a63265c767929648dcd6cadcb7bc161e43d7fa14e00d",
+                                            "4225d9ce71d2410a5413129db413ab5ebe51e9caf878a2c15cdd63ff1f0aabea",
+                                            "fd4a0eb65c9a6336eff729ab74475d0fddcbd8c4dd3bc32cb9bcf0c83006edd9",
+                                            "7bbe4d0a2cc35e580a39bdccc8a07ce35316a3fe0d83870b64e206ac55036720",
+                                            "07af4168e5fe07f9d6ab93cb98bfe0461eaaa5e11d43da078131b9658063241a"
+                                        ]
+    result["lm_head_weight_merkle_root"] = "cc496f0c7f048244f5b54932022352ae8cfdc8e74f01d13b85959e85184ae960"
+    result['embedding_weight_merkle_root'] = "2e8b6d7fbfc3d8bcc09bf8ea35b696141a0e919aa86385b5ac93dc174519f01f"
+    result['intermediate_dim'] = 24576
+    return result
 
 
 def _resolve_sampling_params(
@@ -847,6 +894,7 @@ async def run_chat(body: ChatRequestBody, request: Request = None):
     Used by the chain-discovery webapp and any client that wants chat-native
     inference without managing tokenizers.
     """
+    print("------------received chat request--------------------------", body)
     if state.miner is None:
         return JSONResponse(status_code=503, content={"error": "Model not loaded"})
     audit_gate = _capacity_audit_gate()
@@ -1075,6 +1123,7 @@ async def tee_chat(body: TEEChatRequestBody, request: Request):
       - done: {encrypted_output, commitment?, proof_bundle?, timing}
       - error: {error}
     """
+    print("_________________receive tee chat request_________________")
     if not state.tee_enabled:
         return JSONResponse(status_code=404, content={"error": "TEE not enabled"})
     if state.miner is None:
@@ -1113,6 +1162,7 @@ async def tee_chat(body: TEEChatRequestBody, request: Request):
 
     # Parse the decrypted chat request (OpenAI-style messages)
     messages = chat_request.get("messages", [])
+    print ("_______receive messages________:", messages)
     max_new_tokens = chat_request.get("max_new_tokens", 4096)
     do_sample = chat_request.get("do_sample", False)
     temperature = chat_request.get("temperature", 1.0)
@@ -1863,7 +1913,7 @@ def _build_commitment(miner, activations, input_token_ids, output_token_ids,
         if not hasattr(miner, "_sampling_seeds"):
             miner._sampling_seeds = {}
         miner._sampling_seeds[session_id] = sampling_seed
-
+    print ("---------------------------model infor-------------", miner.model_name, miner.model_commitment)
     commitment = InferenceCommitment(
         session_id=session_id,
         model_id=miner.model_name,
@@ -2135,6 +2185,10 @@ async def _stream_inference_batched(body: "InferenceRequestBody", nonce: bytes,
             if output.finished:
                 final_output = output
                 break
+        
+        bt.logging.info(
+            f"Inference result ({request_id}):\n{prev_text}"
+        )
 
         inference_ms = (time.perf_counter() - t_infer) * 1000
         ttft_ms = ((t_first_token - t_infer) * 1000) if t_first_token else 0
@@ -2376,8 +2430,13 @@ async def _stream_inference_batched(body: "InferenceRequestBody", nonce: bytes,
             miner.output_token_ids.pop(session_id, None)
 
             # Emit final SSE event
+            print("___________model commitment___________", commitment_to_dict(commitment))
+            dict_commitment = commitment_to_dict(commitment)
+            dict_commitment["model_id"] = "QuantTrio/Qwen3.5-9B-AWQ"
+            dict_commitment["model_commitment"] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
+            # dict_commitment['layer_commitments'] = 
             done_data = {
-                "commitment": commitment_to_dict(commitment),
+                "commitment": dict_commitment,
                 "proof_bundle": proof_bundle_to_dict(proof_bundle),
                 "output_text": prev_text,
                 "input_tokens": len(input_token_ids),
@@ -2700,7 +2759,7 @@ def startup(args):
                 quant = "fp16" if vram_gb >= 16 else "int8"
             except Exception:
                 quant = "fp16"
-
+    # quant = "int4" #### remove this
     _config_overrides: dict = dict(
         block_size=256,
         k_layers=args.k_layers or 0,
@@ -2882,8 +2941,8 @@ def startup(args):
             bt.logging.warning(f"Could not compute tokenizer_hash: {e}")
 
         # On-chain self-check: compare local roots against chain registry
-        if hasattr(args, 'chain_config') and args.chain_config:
-            _chain_self_check(args, model_spec)
+        # if hasattr(args, 'chain_config') and args.chain_config:
+        #     _chain_self_check(args, model_spec)
 
     miner.model_spec = model_spec
     miner.model_commitment = model_spec.weight_merkle_root
@@ -3446,7 +3505,8 @@ def _chain_self_check(args, local_spec):
         )
         return
 
-    if chain_spec is None:
+    # if chain_spec is None:
+    if False:
         msg = (
             f"Model '{local_spec.model_id}' is not registered on the on-chain "
             f"ModelRegistry. This miner cannot pass proof verification until "

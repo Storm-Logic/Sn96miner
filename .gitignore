@@ -20,6 +20,7 @@ eggs/
 *.spec
 
 # Virtual environments
+.venv-btcli
 .venv/
 .venv-vllm/
 .venv-vllm-016/

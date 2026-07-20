@@ -2317,6 +2317,7 @@ def resolve_model_for_tier(
     # resolve to the AWQ config, not the unrelated GB_80 fp16 config.
     candidates: list[TierConfig] = []
     for tc in model.tier_configs:
+        print ("33333", tc.tier)
         if tc.tier <= tier:
             candidates.append(tc)
 

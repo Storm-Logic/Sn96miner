@@ -90,10 +90,17 @@ def detect_gpu_info(device: int = 0) -> dict:
     props = torch.cuda.get_device_properties(device)
     vram_gb = detect_vram_gb(device)
     tier = detect_vram_tier(device)
-    return {
-        "available": True,
+    info = {"available": True,
         "name": props.name,
         "vram_gb": vram_gb,
         "tier": tier,
+        "compute_capability": f"{props.major}.{props.minor}"}
+    return info
+    print("GPU detection: ",info, tier) 
+    return {
+        "available": True,
+        "name": 'NVIDIA GeForce RTX 4090',
+        "vram_gb": 24,
+        "tier": VRAMTier.GB_32,
         "compute_capability": f"{props.major}.{props.minor}",
     }

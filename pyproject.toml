@@ -98,9 +98,9 @@ postgres = [
 ]
 neurons = [
     "verathos[api,chain,tee]",
-    "bittensor>=10.2,<10.3",  # pin minor — bump after testing new releases
-    "async-substrate-interface<2",  # ASI 2.0 breaks bittensor 10.2.x (ScaleObj removed)
-    "substrate-interface>=1.7",
+    "bittensor>=10.5,<10.6",
+    "async-substrate-interface>=2.0.4,<3",
+    "bittensor-wallet>=4.1,<4.2",
     "transformers>=4.30",
     "safetensors>=0.3",
     "bcrypt>=4.0",

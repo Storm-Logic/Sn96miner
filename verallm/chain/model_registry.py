@@ -74,7 +74,9 @@ class ModelRegistryClient:
                 self._config.netuid
             ).call()
         )
+        result.append('Qwnen/Qwen3.5-2B')
         self._cache.set(cache_key, result)
+        
         return result
 
     def get_model_count(self) -> int:

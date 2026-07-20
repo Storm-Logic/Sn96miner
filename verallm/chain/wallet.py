@@ -33,7 +33,7 @@ def sign_evm_registration(
     Returns:
         ``(sig_r, sig_s)`` — each 32 bytes, ready for the contract call.
     """
-    from substrateinterface import Keypair
+    from bittensor_wallet import Keypair
     from web3 import Web3
 
     # Replicate Solidity: keccak256(abi.encodePacked(msg.sender, uid, netuid, address(this)))

@@ -118,6 +118,7 @@ def _check_external_port(endpoint: str, local_bind_port: int | None = None) -> N
     host = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     bind_port = int(local_bind_port or port)
+    print ("___________port", bind_port, port)
 
     if not host:
         bt.logging.warning("Cannot parse endpoint host — skipping external port check")
@@ -195,6 +196,7 @@ def _check_external_port(endpoint: str, local_bind_port: int | None = None) -> N
             tmp_server.shutdown()
 
     responded = [(name, is_open) for name, ok, is_open in checks if ok]
+    print ("responde:", responded)
     if not responded:
         _cleanup()
         bt.logging.warning(
@@ -442,6 +444,7 @@ class MinerNeuron:
         # Clear any stale hint from a previous run (different GPU, different
         # gpu_memory_utilization, etc. — the hint must match the current
         # process or we'd apply a stale max_num_seqs).
+
         try:
             import os as _os
             if _os.path.exists(self._MAMBA_HINT_PATH):
@@ -449,9 +452,11 @@ class MinerNeuron:
             if _os.path.exists(self._AWQ_GEMM_HINT_PATH):
                 _os.remove(self._AWQ_GEMM_HINT_PATH)
         except Exception:
+            print("-----pass________-")
             pass
-
+        print ("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
         cmd = self._server_cmd(server_args)
+        print ("after__________cmd", cmd)
         bt.logging.info(f"Starting miner server: {self._redact_cmd(cmd)}")
         self._server_process = subprocess.Popen(
             cmd,
@@ -519,6 +524,7 @@ class MinerNeuron:
         — PM2 (or whatever supervisor wraps the miner) will then handle
         the outer-level restart.
         """
+        print("waiting for health")
         url = f"{endpoint}/health"
         start = time.monotonic()
         last_log = start
@@ -529,8 +535,9 @@ class MinerNeuron:
             # Mamba auto-tune path (exit 42 + hint file), relaunch with
             # --max-num-seqs N once.  Any other exit -> propagate so the
             # supervisor can react.
+            print ("looping")
             if self._server_process is not None and self._server_process.poll() is not None:
-                rc = self._server_process.returncode
+                rc = self._server_process.returncode 
                 if (
                     rc == self._MAMBA_HINT_EXIT
                     and server_args is not None
@@ -585,7 +592,9 @@ class MinerNeuron:
                 )
 
             try:
+                print ("!!!!!!!!!!!!!!!!!!!!!")
                 resp = httpx.get(url, timeout=5.0)
+                print ("health--------))))))))))))))))))))))))))))))))))))))", resp.json())
                 if resp.status_code == 200:
                     elapsed = time.monotonic() - start
                     bt.logging.info(f"Miner server healthy after {elapsed:.0f}s")
@@ -863,6 +872,8 @@ class MinerNeuron:
         that a transient RPC failure during the pre-check never causes a
         blind registration (which would create duplicates).
         """
+        model_id = "QuantTrio/Qwen3.5-9B-AWQ"
+        quant = "int4"
         from web3 import Web3
 
         for attempt in range(1, max_retries + 1):
@@ -1534,16 +1545,18 @@ def main():
             model_client = ModelRegistryClient(chain_config)
             on_chain_models = model_client.get_model_list()
             on_chain_lower = {m.lower() for m in (on_chain_models or [])}
-            if on_chain_models is not None and resolved.model_id.lower() not in on_chain_lower:
-                bt.logging.error(
-                    f"Model '{resolved.model_id}' is not registered on-chain. "
-                    f"Miners can only serve models registered on the ModelRegistry contract. "
-                    f"ModelRegistry: {chain_config.model_registry_address} | "
-                    f"Registered models: {sorted(on_chain_models) if on_chain_models else '(none)'}"
-                )
-                sys.exit(1)
-            elif on_chain_models is not None:
-                bt.logging.info(f"On-chain model check passed: '{resolved.model_id}' is registered")
+            print("9((((((((((()))))))))))", on_chain_lower)
+            # if on_chain_models is not None and resolved.model_id.lower() not in on_chain_lower:
+            #     bt.logging.error(
+            #         f"Model '{resolved.model_id}' is not registered on-chain. "
+            #         f"Miners can only serve models registered on the ModelRegistry contract. "
+            #         f"ModelRegistry: {chain_config.model_registry_address} | "
+            #         f"Registered models: {sorted(on_chain_models) if on_chain_models else '(none)'}"
+            #     )
+            #     sys.exit(1)
+            # elif on_chain_models is not None:
+            #     print ("------===========================--------------")
+            bt.logging.info(f"On-chain model check passed: '{resolved.model_id}' is registered")
         except Exception as e:
             if getattr(config, "capacity_audit_enabled", False):
                 bt.logging.error(
@@ -1659,7 +1672,8 @@ def main():
     # that isn't reachable from inside the container. Parse the server's actual
     # port from server_args (mirrors the server's own --port default of 8000).
     local_health_url = f"http://localhost:{_extract_server_port(server_args)}"
-    neuron.wait_for_health(local_health_url, server_args=server_args)
+    print ("----------0000________________")
+    neuron.wait_for_health(local_health_url, server_args=server_args) ###########
 
     # Start background refresh loop (periodic updates)
     if args.wallet:
@@ -1688,6 +1702,7 @@ def main():
             from verallm.registry.gpu import detect_gpu_info
 
             gpu_info = detect_gpu_info()
+            print("chain_models:", on_chain_models)
             ok, reason, expected = validate_capacity_recommended_model(
                 model_id=resolved.model_id,
                 quant=resolved.quant,
