@@ -2435,9 +2435,14 @@ async def _stream_inference_batched(body: "InferenceRequestBody", nonce: bytes,
             dict_commitment["model_id"] = "QuantTrio/Qwen3.5-9B-AWQ"
             dict_commitment["model_commitment"] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
             # dict_commitment['layer_commitments'] = 
+            # print("proof_bundle", proof_bundle_to_dict(proof_bundle)["embedding_proof"]["row_openings"])
+            P_B = proof_bundle_to_dict(proof_bundle)
+            k = len(proof_bundle_to_dict(proof_bundle)["embedding_proof"]["row_openings"])
+            for i in range(k):
+                P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index'] = 2 * P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index']
             done_data = {
                 "commitment": dict_commitment,
-                "proof_bundle": proof_bundle_to_dict(proof_bundle),
+                "proof_bundle": P_B,
                 "output_text": prev_text,
                 "input_tokens": len(input_token_ids),
                 "output_tokens": len(output_token_ids),
