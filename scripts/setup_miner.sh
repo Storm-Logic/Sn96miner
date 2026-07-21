@@ -604,6 +604,18 @@ if [ "${WORKSPACE_IS_FUSE:-0}" = "1" ]; then
 fi
 
 # ── System dependencies ────────────────────────────────────────────────────
+# Triton compiles a small CUDA driver helper at runtime and needs Python.h.
+PY_VER=$($PYTHON -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PYTHON_HEADER="/usr/include/python${PY_VER}/Python.h"
+if [ ! -f "$PYTHON_HEADER" ] && can_run_privileged; then
+    if command -v apt-get &>/dev/null; then
+        run_privileged apt-get update -qq
+        run_privileged apt-get install -y -qq "python${PY_VER}-dev" >/dev/null
+    elif command -v dnf &>/dev/null; then
+        run_privileged dnf install -y "python${PY_VER}-devel" >/dev/null
+    fi
+fi
+
 # ninja-build: required by FlashInfer JIT compilation on Hopper/Blackwell (sm_90+)
 if ! command -v ninja &>/dev/null; then
     if can_run_privileged; then
