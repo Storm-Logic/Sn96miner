@@ -894,7 +894,7 @@ async def run_chat(body: ChatRequestBody, request: Request = None):
     Used by the chain-discovery webapp and any client that wants chat-native
     inference without managing tokenizers.
     """
-    print("------------received chat request--------------------------", body)
+    print("------------received chat request----------------",)
     if state.miner is None:
         return JSONResponse(status_code=503, content={"error": "Model not loaded"})
     audit_gate = _capacity_audit_gate()
@@ -1913,7 +1913,7 @@ def _build_commitment(miner, activations, input_token_ids, output_token_ids,
         if not hasattr(miner, "_sampling_seeds"):
             miner._sampling_seeds = {}
         miner._sampling_seeds[session_id] = sampling_seed
-    print ("---------------------------model infor-------------")
+    # print ("---------------------------model infor-------------")
     commitment = InferenceCommitment(
         session_id=session_id,
         model_id=miner.model_name,
@@ -2430,7 +2430,7 @@ async def _stream_inference_batched(body: "InferenceRequestBody", nonce: bytes,
             miner.output_token_ids.pop(session_id, None)
 
             # Emit final SSE event
-            print("___________model commitment___________")
+            # print("___________model commitment___________")
             dict_commitment = commitment_to_dict(commitment)
             # dict_commitment["model_id"] = "QuantTrio/Qwen3.5-9B-AWQ"
             # dict_commitment["model_commitment"] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
