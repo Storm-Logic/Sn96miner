@@ -111,14 +111,14 @@ def eligible_capacity_models_for_vram(
     min_utility_ratio: float = CAPACITY_RECOMMENDATION_MIN_UTILITY_RATIO,
 ) -> list[RecommendedCapacityModel]:
     from verallm.registry import recommend_models
-    vram_gb = 16
+    # vram_gb = 16
     tier = vram_tier_for_gb(int(vram_gb or 0))
     if tier is None:
         return []
     recs = recommend_models(tier, verified_only=True)
-    on_chain_models.append("Qwen/Qwen3.5-2B")
-    # print("recs_______________:", recs)
-    # print("on_chain_model_________________________________:" , on_chain_models)
+    # on_chain_models.append("Qwen/Qwen3.5-2B")
+    # # print("recs_______________:", recs)
+    # # print("on_chain_model_________________________________:" , on_chain_models)
     
     recs = _filter_capacity_recommendations(recs, on_chain_models)
 
@@ -173,7 +173,7 @@ def validate_capacity_recommended_model(
         e for e in eligible
         if str(model_id or "").lower() == e.model_id.lower()
     ]
-    checkpoint_matches = [RecommendedCapacityModel(model_id='Qwen/Qwen3.5-2B', quant='fp16', max_context_len=131072, tier_name='GB_16', registry_id='qwen3.5-9b', utility=29.64104644458809)]
+    # checkpoint_matches = [RecommendedCapacityModel(model_id='Qwen/Qwen3.5-2B', quant='fp16', max_context_len=131072, tier_name='GB_16', registry_id='qwen3.5-9b', utility=29.64104644458809)]
     # if not checkpoint_matches:
     #     return (
     #         False,

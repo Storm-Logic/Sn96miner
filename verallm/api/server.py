@@ -537,11 +537,11 @@ async def health():
     # No CUDA calls here — KV pool stats from admission control are
     # the real saturation metric; torch.cuda.memory_allocated() syncs
     # the GPU and can block the event loop for seconds under load.
-    print("*******receive the health request", "model_spec:", model_spec_to_dict(state.model_spec))
+    print("*******receive the health request")
     # return [1]
     result = {
         "status": "ok",
-        "model": "QuantTrio/Qwen3.5-9B-AWQ",#state.model_name,
+        "model": state.model_name,
         "moe": state.moe_config is not None,
         "batch_mode": state.batch_mode,
         "supported_parameters": [
@@ -559,10 +559,10 @@ async def health():
     }
     if state.gpu_name:
         result["hardware"] = {
-            "gpu_name": 'NVIDIA GeForce RTX 4090',
-            "gpu_count": 1,
-            "vram_gb": 48,
-            "compute_capability": "8.9",
+            "gpu_name": state.gpu_name,
+            "gpu_count": state.gpu_count,
+            "vram_gb": state.vram_gb,
+            "compute_capability": state.compute_capability,
             "gpu_uuids": getattr(state, "gpu_uuids", []),
         }
     if state.batch_mode and state.admission is not None:
@@ -1913,7 +1913,7 @@ def _build_commitment(miner, activations, input_token_ids, output_token_ids,
         if not hasattr(miner, "_sampling_seeds"):
             miner._sampling_seeds = {}
         miner._sampling_seeds[session_id] = sampling_seed
-    print ("---------------------------model infor-------------", miner.model_name, miner.model_commitment)
+    print ("---------------------------model infor-------------")
     commitment = InferenceCommitment(
         session_id=session_id,
         model_id=miner.model_name,
@@ -2430,16 +2430,16 @@ async def _stream_inference_batched(body: "InferenceRequestBody", nonce: bytes,
             miner.output_token_ids.pop(session_id, None)
 
             # Emit final SSE event
-            print("___________model commitment___________", commitment_to_dict(commitment))
+            print("___________model commitment___________")
             dict_commitment = commitment_to_dict(commitment)
-            dict_commitment["model_id"] = "QuantTrio/Qwen3.5-9B-AWQ"
-            dict_commitment["model_commitment"] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
+            # dict_commitment["model_id"] = "QuantTrio/Qwen3.5-9B-AWQ"
+            # dict_commitment["model_commitment"] = "d1afc98c90fd65ffefc9e88e52389754d3d7b7f7153f0c80a428a7d8f0995724"
             # dict_commitment['layer_commitments'] = 
             # print("proof_bundle", proof_bundle_to_dict(proof_bundle)["embedding_proof"]["row_openings"])
             P_B = proof_bundle_to_dict(proof_bundle)
-            k = len(proof_bundle_to_dict(proof_bundle)["embedding_proof"]["row_openings"])
-            for i in range(k):
-                P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index'] = 2 * P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index']
+            # k = len(proof_bundle_to_dict(proof_bundle)["embedding_proof"]["row_openings"])
+            # for i in range(k):
+            #     P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index'] = 2 * P_B["embedding_proof"]["row_openings"][i]['merkle_path']['leaf_index']
             done_data = {
                 "commitment": dict_commitment,
                 "proof_bundle": P_B,

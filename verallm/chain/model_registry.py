@@ -74,7 +74,7 @@ class ModelRegistryClient:
                 self._config.netuid
             ).call()
         )
-        result.append('Qwnen/Qwen3.5-2B')
+        # result.append('Qwnen/Qwen3.5-2B') 
         self._cache.set(cache_key, result)
         
         return result
